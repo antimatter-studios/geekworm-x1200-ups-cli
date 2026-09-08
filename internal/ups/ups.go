@@ -61,10 +61,37 @@ type Power struct {
 	ShuntOhms *float64 `json:"shunt_ohms,omitempty"`
 }
 
+// Supply is where the machine's power is actually coming from.
+//
+// This is the only authoritative answer to "am I on battery", which is usually the whole point of
+// owning a UPS. Nothing on the I2C bus can provide it: the fuel gauge measures charge and not
+// direction, and the INA219 sits downstream of the changeover so it sees the same load either way.
+// The board signals it on a GPIO instead.
+type Supply struct {
+	// OnMains is true when the adapter is supplying power.
+	OnMains bool `json:"on_mains"`
+	// Line is the GPIO the answer came from, so a reader can check it themselves.
+	Line uint32 `json:"gpio_line"`
+	// Caveat records why a positive reading is weaker evidence than a negative one. The line is
+	// read with a pull-up and mains-present is high, so a disconnected or intermittent pin also
+	// reads high — and this HAT connects through pogo pins, which is exactly the contact that goes
+	// intermittent. A stuck "on mains" is therefore a possible fault, not proof.
+	Caveat string `json:"caveat,omitempty"`
+}
+
+// Charging is whether the board is currently allowed to charge the pack.
+type Charging struct {
+	Enabled bool   `json:"enabled"`
+	Line    uint32 `json:"gpio_line"`
+}
+
 // Reading is the whole picture at one moment. Either half may be missing.
 type Reading struct {
 	Battery *Battery `json:"battery,omitempty"`
 	Power   *Power   `json:"power,omitempty"`
+	// Supply and Charging come from GPIO rather than sysfs, so Read does not populate them either.
+	Supply   *Supply   `json:"supply,omitempty"`
+	Charging *Charging `json:"charging,omitempty"`
 	// Estimate is how long the pack has left, and is the one field Read does not populate.
 	//
 	// It cannot: a duration is derived from how the numbers have moved, which needs stored samples

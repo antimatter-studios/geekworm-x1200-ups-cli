@@ -48,8 +48,9 @@ func Text(r *Reading) string {
 		return ""
 	}
 	groups := []group{
-		{name: "battery", rows: batteryRows(r.Battery, r.Estimate)},
+		{name: "battery", rows: batteryRows(r.Battery, r.Estimate, r.Supply)},
 		{name: "power", rows: powerRows(r.Power)},
+		{name: "supply", rows: supplyRows(r.Supply, r.Charging)},
 		{name: "estimate", rows: estimateRows(r.Estimate)},
 	}
 
@@ -112,7 +113,7 @@ func inferred(e *estimate.Estimate) estimate.State {
 // This is a stand-in. The X1200 reports mains presence on GPIO6, which is instant and authoritative
 // where an inference needs minutes of history and cannot distinguish a pack sitting full on mains
 // from one on battery that has not yet dropped a percent. Once that pin is read, it supersedes this.
-func batteryRows(b *Battery, e *estimate.Estimate) []row {
+func batteryRows(b *Battery, e *estimate.Estimate, supply *Supply) []row {
 	if b == nil {
 		return nil
 	}
@@ -129,10 +130,14 @@ func batteryRows(b *Battery, e *estimate.Estimate) []row {
 
 	state := strings.ToLower(b.Status)
 	if state == unknownStatus {
-		switch inferred(e) {
-		case estimate.Discharging:
+		switch {
+		case supply != nil && !supply.OnMains:
+			state = "on battery — mains lost"
+		case supply != nil:
+			state = "on mains"
+		case inferred(e) == estimate.Discharging:
 			state = "discharging — inferred from samples, not measured"
-		case estimate.Charging:
+		case inferred(e) == estimate.Charging:
 			state = "charging — inferred from samples, not measured"
 		default:
 			// Explained inline because it never improves on its own and is otherwise the most
@@ -182,6 +187,34 @@ func powerRows(p *Power) []row {
 			value += "  (" + strings.Join(detail, ", ") + ")"
 		}
 		rows = append(rows, row{"shunt", value})
+	}
+	return rows
+}
+
+// supplyRows renders where the power is coming from, and whether charging is permitted.
+//
+// This is the group a reader looks at first during an outage, and the one that was missing entirely
+// until GPIO6 was read: everything else in the output describes the pack, not the situation.
+func supplyRows(s *Supply, c *Charging) []row {
+	rows := make([]row, 0, 3)
+	if s != nil {
+		source := "battery — MAINS LOST"
+		if s.OnMains {
+			source = "mains"
+		}
+		rows = append(rows, row{"source", fmt.Sprintf("%s  (GPIO%d)", source, s.Line)})
+		// Only shown when on mains: the caveat is that a stuck-high line reads as healthy, so it
+		// qualifies a positive reading and has nothing to say about a negative one.
+		if s.OnMains && s.Caveat != "" {
+			rows = append(rows, row{"caveat", s.Caveat})
+		}
+	}
+	if c != nil {
+		state := "disabled"
+		if c.Enabled {
+			state = "enabled"
+		}
+		rows = append(rows, row{"charging", fmt.Sprintf("%s  (GPIO%d)", state, c.Line)})
 	}
 	return rows
 }

@@ -73,22 +73,22 @@ func TestTextNil(t *testing.T) {
 }
 
 func TestBatteryRows(t *testing.T) {
-	if got := batteryRows(nil, nil); got != nil {
+	if got := batteryRows(nil, nil, nil); got != nil {
 		t.Errorf("batteryRows(nil) = %v", got)
 	}
 	// A gauge that cannot report a percentage must not render as 0%: an unreadable gauge and a flat
 	// pack are opposite situations and only one is an emergency.
-	got := find(batteryRows(&Battery{Name: "battery", Status: "Unknown"}, nil), "charge")
+	got := find(batteryRows(&Battery{Name: "battery", Status: "Unknown"}, nil, nil), "charge")
 	if strings.Contains(got, "0%") {
 		t.Errorf("absent percentage rendered as %q", got)
 	}
-	if got := find(batteryRows(&Battery{Percent: i(0), Status: "Discharging"}, nil), "charge"); got != "0%" {
+	if got := find(batteryRows(&Battery{Percent: i(0), Status: "Discharging"}, nil, nil), "charge"); got != "0%" {
 		t.Errorf("zero percent rendered as %q; want 0%%", got)
 	}
-	if got := find(batteryRows(&Battery{Percent: i(50), Status: "Unknown", Present: b(false)}, nil), "pack"); got != "NOT FITTED" {
+	if got := find(batteryRows(&Battery{Percent: i(50), Status: "Unknown", Present: b(false)}, nil, nil), "pack"); got != "NOT FITTED" {
 		t.Errorf("absent pack not flagged: %q", got)
 	}
-	if got := find(batteryRows(&Battery{Percent: i(50), Status: "Unknown", Present: b(true)}, nil), "pack"); got != "" {
+	if got := find(batteryRows(&Battery{Percent: i(50), Status: "Unknown", Present: b(true)}, nil, nil), "pack"); got != "" {
 		t.Errorf("present pack wrongly flagged: %q", got)
 	}
 }
@@ -96,7 +96,7 @@ func TestBatteryRows(t *testing.T) {
 // The gauge reads "unknown" forever on this hardware, so a bare "unknown" is the least useful thing
 // the tool could print. With no inference available it must at least explain itself.
 func TestBatteryStateExplainsAnUnknownGauge(t *testing.T) {
-	got := find(batteryRows(&Battery{Percent: i(80), Status: "Unknown"}, nil), "state")
+	got := find(batteryRows(&Battery{Percent: i(80), Status: "Unknown"}, nil, nil), "state")
 	if !strings.HasPrefix(got, "unknown") {
 		t.Fatalf("state = %q, want it to start with unknown", got)
 	}
@@ -111,7 +111,7 @@ func TestBatteryStateExplainsAnUnknownGauge(t *testing.T) {
 func TestBatteryStateUsesTheInferredDirection(t *testing.T) {
 	rate := -20.0
 	e := &estimate.Estimate{State: estimate.Discharging, PercentPerHour: &rate}
-	got := find(batteryRows(&Battery{Percent: i(80), Status: "Unknown"}, e), "state")
+	got := find(batteryRows(&Battery{Percent: i(80), Status: "Unknown"}, e, nil), "state")
 	if !strings.HasPrefix(got, "discharging") {
 		t.Fatalf("state = %q, want discharging", got)
 	}
@@ -124,7 +124,7 @@ func TestBatteryStateUsesTheInferredDirection(t *testing.T) {
 // a whole percent look identical, so neither may be claimed.
 func TestBatteryStateWillNotGuessFromSteady(t *testing.T) {
 	e := &estimate.Estimate{State: estimate.Steady}
-	got := find(batteryRows(&Battery{Percent: i(80), Status: "Unknown"}, e), "state")
+	got := find(batteryRows(&Battery{Percent: i(80), Status: "Unknown"}, e, nil), "state")
 	if !strings.HasPrefix(got, "unknown") {
 		t.Errorf("state = %q; steady must not be read as a direction", got)
 	}
@@ -133,7 +133,7 @@ func TestBatteryStateWillNotGuessFromSteady(t *testing.T) {
 // A real status from the kernel is passed through untouched: the explanation is only for the
 // permanent "unknown" this hardware produces.
 func TestBatteryStatePassesARealStatusThrough(t *testing.T) {
-	got := find(batteryRows(&Battery{Percent: i(80), Status: "Discharging"}, nil), "state")
+	got := find(batteryRows(&Battery{Percent: i(80), Status: "Discharging"}, nil, nil), "state")
 	if got != "discharging" {
 		t.Errorf("state = %q, want the kernel's own word unadorned", got)
 	}
@@ -216,5 +216,54 @@ func TestJSONOmitsAbsentValuesRatherThanZeroingThem(t *testing.T) {
 func TestJSONNil(t *testing.T) {
 	if _, err := JSON(nil); !errors.Is(err, ErrNoDevices) {
 		t.Errorf("JSON(nil) err = %v; want ErrNoDevices", err)
+	}
+}
+
+// GPIO6 is measured where the inference is guessed, so it wins. This is the whole point of reading
+// the pin: an inference needs minutes of history and cannot tell a full pack on mains from one on
+// battery that has not yet lost a percent.
+func TestBatteryStatePrefersMeasuredSupplyOverInference(t *testing.T) {
+	rate := -20.0
+	discharging := &estimate.Estimate{State: estimate.Discharging, PercentPerHour: &rate}
+
+	onMains := find(batteryRows(&Battery{Percent: i(80), Status: "Unknown"}, discharging, &Supply{OnMains: true, Line: 6}), "state")
+	if !strings.Contains(onMains, "mains") {
+		t.Errorf("state = %q; the measured pin must win over the inference", onMains)
+	}
+	if strings.Contains(onMains, "inferred") {
+		t.Errorf("state = %q; a measured reading must not be labelled inferred", onMains)
+	}
+
+	onBattery := find(batteryRows(&Battery{Percent: i(80), Status: "Unknown"}, nil, &Supply{OnMains: false, Line: 6}), "state")
+	if !strings.Contains(onBattery, "battery") {
+		t.Errorf("state = %q; want it to say the mains is gone", onBattery)
+	}
+}
+
+func TestSupplyRows(t *testing.T) {
+	if got := supplyRows(nil, nil); len(got) != 0 {
+		t.Errorf("supplyRows(nil, nil) = %v; want nothing to render", got)
+	}
+
+	lost := supplyRows(&Supply{OnMains: false, Line: 6, Caveat: "pull-up"}, nil)
+	if src := find(lost, "source"); !strings.Contains(src, "MAINS LOST") || !strings.Contains(src, "GPIO6") {
+		t.Errorf("source = %q; want the loss called out and the pin named", src)
+	}
+	// The caveat qualifies a positive reading only: a stuck-high pin reads as healthy, which says
+	// nothing about a reading that is already low.
+	if find(lost, "caveat") != "" {
+		t.Error("caveat shown while on battery, where it does not apply")
+	}
+	if c := find(supplyRows(&Supply{OnMains: true, Line: 6, Caveat: "pull-up"}, nil), "caveat"); c == "" {
+		t.Error("no caveat shown on mains, where a stuck pin would look identical")
+	}
+
+	// Charging is active-low on this board, so the rendering must not leak the raw level.
+	on := find(supplyRows(nil, &Charging{Enabled: true, Line: 16}), "charging")
+	if !strings.Contains(on, "enabled") || !strings.Contains(on, "GPIO16") {
+		t.Errorf("charging = %q", on)
+	}
+	if off := find(supplyRows(nil, &Charging{Enabled: false, Line: 16}), "charging"); !strings.Contains(off, "disabled") {
+		t.Errorf("charging = %q", off)
 	}
 }

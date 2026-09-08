@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/estimate"
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/gpio"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/history"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/sysfs"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/ups"
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/x1200"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=...".
@@ -28,6 +30,8 @@ type options struct {
 	watch   time.Duration
 	history string
 	window  time.Duration
+	gpio    bool
+	chip    string
 }
 
 // Defaults for the sample store.
@@ -59,7 +63,7 @@ func main() {
 	if opts.history != "" {
 		store = history.File(opts.history)
 	}
-	if err := run(sysfs.OS(opts.root), os.Stdout, time.Sleep, time.Now, store, opts); err != nil {
+	if err := run(sysfs.OS(opts.root), os.Stdout, time.Sleep, time.Now, store, gpio.OS{}, opts); err != nil {
 		fmt.Fprintln(os.Stderr, "x1200:", err)
 		os.Exit(1)
 	}
@@ -79,6 +83,8 @@ func parse(args []string, errOut io.Writer) (opts options, done bool, err error)
 	fs.DurationVar(&opts.watch, "watch", 0, "repeat at this interval, e.g. 2s; 0 reads once")
 	fs.StringVar(&opts.history, "history", defaultHistory, "sample store used to estimate time remaining; empty disables it")
 	fs.DurationVar(&opts.window, "window", defaultWindow, "how much history to keep and estimate from")
+	fs.BoolVar(&opts.gpio, "gpio", true, "read mains presence and charging state from GPIO")
+	fs.StringVar(&opts.chip, "chip", "", "gpiochip to use; empty picks the header controller")
 
 	if err := fs.Parse(args); err != nil {
 		return opts, false, err
@@ -94,9 +100,9 @@ func parse(args []string, errOut io.Writer) (opts options, done bool, err error)
 //
 // sleep is a parameter rather than a call to time.Sleep so that a test of the watch loop takes no
 // time and needs no goroutine.
-func run(fs sysfs.FS, out io.Writer, sleep func(time.Duration), now func() time.Time, store history.Store, opts options) error {
+func run(fs sysfs.FS, out io.Writer, sleep func(time.Duration), now func() time.Time, store history.Store, port gpio.Port, opts options) error {
 	for {
-		text, err := once(fs, now, store, opts)
+		text, err := once(fs, now, store, port, opts)
 		if err != nil {
 			return err
 		}
@@ -116,10 +122,15 @@ func run(fs sysfs.FS, out io.Writer, sleep func(time.Duration), now func() time.
 // made read-only, or pointed somewhere unwritable, and none of that is a reason to withhold the
 // battery percentage — which is the number that matters when the power has just gone. The estimate
 // is simply absent, and its own Note says why nothing can be said.
-func once(fs sysfs.FS, now func() time.Time, store history.Store, opts options) (string, error) {
+func once(fs sysfs.FS, now func() time.Time, store history.Store, port gpio.Port, opts options) (string, error) {
 	reading, err := ups.Read(fs)
 	if err != nil {
 		return "", err
+	}
+	// GPIO first: the estimator wants to know whether the pack is discharging, and a measured
+	// answer from the mains pin is better than the inference it would otherwise fall back on.
+	if opts.gpio {
+		supply(reading, port, opts.chip)
 	}
 	reading.Estimate = track(reading, now, store, opts.window)
 	if opts.json {
@@ -156,8 +167,43 @@ func track(reading *ups.Reading, now func() time.Time, store history.Store, wind
 		// Report the reading anyway; say why the estimate is missing rather than swallowing it.
 		return &estimate.Estimate{State: estimate.Unknown, Note: "history unavailable: " + err.Error()}
 	}
-	// discharging is not yet known from any authoritative source — the mains-detection GPIO is the
-	// next thing to build — so the estimator is told nothing and infers direction from the samples.
-	est := estimate.From(samples, false)
+	// Tell the estimator what the mains pin measured, where it was readable. It uses this only to
+	// sharpen its wording: a pack that is definitely on battery but has not yet dropped a whole
+	// percent is not "steady", it is early, and the two deserve different words.
+	onBattery := reading.Supply != nil && !reading.Supply.OnMains
+	est := estimate.From(samples, onBattery)
 	return &est
+}
+
+// supply attaches the mains and charging state read from GPIO.
+//
+// Silent on failure, and that is deliberate: the overwhelmingly common reason these fail is that the
+// pin has never been configured as an input, which is a setup step rather than a fault, and printing
+// an error on every invocation until somebody runs `x1200 setup` would train them to ignore it. The
+// absence of the supply group is itself the signal, and `x1200 doctor` is where the explanation
+// belongs.
+//
+// The failure that would matter — a pin that reads the wrong way — cannot be detected here at all,
+// which is why the caveat on Supply exists.
+func supply(reading *ups.Reading, port gpio.Port, chip string) {
+	if port == nil {
+		return
+	}
+	if chip == "" {
+		chips, err := port.Chips()
+		if err != nil || len(chips) == 0 {
+			return
+		}
+		chip = chips[0]
+	}
+	if onMains, err := x1200.Mains(port, chip); err == nil {
+		reading.Supply = &ups.Supply{
+			OnMains: onMains,
+			Line:    x1200.PLDLine,
+			Caveat:  "read with a pull-up, so a disconnected pin also reads as mains",
+		}
+	}
+	if enabled, err := x1200.Charging(port, chip); err == nil {
+		reading.Charging = &ups.Charging{Enabled: enabled, Line: x1200.ChargeLine}
+	}
 }
