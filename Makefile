@@ -3,8 +3,9 @@ MODULE  := github.com/antimatter-studios/geekworm-x1200-ups-cli
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-# The Pi this is written for. Override on the command line: make deploy HOST=other-pi
-HOST ?= chris@192.168.0.47
+# Where deploy sends the binary. Set it on the command line or in the environment:
+#   make deploy HOST=pi@raspberrypi.local
+HOST ?= pi@raspberrypi.local
 
 .PHONY: all test cover vet fmt build arm64 deploy clean
 
