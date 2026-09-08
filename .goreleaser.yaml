@@ -1,0 +1,100 @@
+# GoReleaser builds, packages and publishes the binaries a release consists of.
+#
+# The point of it here is not convenience. Whatever installs this on the Pi has to verify what it
+# downloaded, and that means every release needs the same set of artefacts, built the same way, with
+# a checksum file alongside them. Doing that by hand in a workflow is where release processes rot:
+# one architecture quietly stops being built, and nobody notices until the machine that needed it
+# is the one being rebuilt.
+version: 2
+
+project_name: x1200
+
+before:
+  hooks:
+    - go mod tidy
+    # Nothing gets released that has not been tested. A tag is exactly the moment when skipping this
+    # is most tempting and least wise.
+    - go test ./...
+
+builds:
+  - id: x1200
+    main: ./cmd/x1200
+    binary: x1200
+
+    # Static binaries, because installing this on a Raspberry Pi should be a copy rather than a
+    # dependency problem. Nothing here links against C, so there is no cost to it.
+    env:
+      - CGO_ENABLED=0
+
+    # -trimpath keeps the building machine's directory layout out of the binary. Without it the
+    # paths of whoever ran the build are embedded in it, which is how RetroPie's binaries on this
+    # very Pi still name a home directory that has not existed for years.
+    flags:
+      - -trimpath
+
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64   # the Raspberry Pi 5 this is written for, and Apple silicon
+      - arm     # 32-bit Raspberry Pi OS, which is still what a lot of older cards are running
+    goarm:
+      - "7"
+
+    ignore:
+      # There is no 32-bit ARM macOS and never was.
+      - goos: darwin
+        goarch: arm
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}
+    files:
+      - README.md
+
+# A Debian package as well as a tarball, because Raspberry Pi OS is Debian and `apt install ./x1200.deb`
+# leaves a record in dpkg that a copied binary does not. Anything auditing the machine later can then
+# see where the file came from.
+nfpms:
+  - id: deb
+    package_name: x1200
+    formats:
+      - deb
+    maintainer: Antimatter Studios
+    description: Reports battery and power state of a Geekworm X1200 UPS HAT on a Raspberry Pi.
+    homepage: https://github.com/antimatter-studios/geekworm-x1200-ups-cli
+    section: utils
+    bindir: /usr/bin
+
+checksum:
+  # The file a Pulumi resource verifies a download against, so that installing this is checked
+  # rather than trusted.
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Changes
+      order: 0
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto
+  footer: |
+    Verify a download against `checksums.txt` before installing it.

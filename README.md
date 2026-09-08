@@ -97,11 +97,26 @@ charge branch: driving four cores took it from 268 mA to 527 mA with the rail sa
 ## Development
 
 ```sh
-make          # vet, test, build
-make cover    # per-function coverage
-make arm64    # cross-compile for the Pi; no toolchain needed, nothing here uses cgo
-make deploy   # scp to a Pi and install to /usr/local/bin
+make            # vet, test, build
+make cover      # per-function coverage
+make arm64      # cross-compile for the Pi; no toolchain needed, nothing here uses cgo
+make snapshot   # every release artefact, built but not published
+make deploy     # scp to a Pi and install to /usr/local/bin
 ```
+
+## Releases
+
+Pushing a `v*` tag builds and publishes through [GoReleaser](https://goreleaser.com): tarballs and
+Debian packages for linux amd64, arm64 and armv7, plus darwin amd64 and arm64, with a
+`checksums.txt` beside them.
+
+The checksums are the point rather than a formality. Whatever installs this on the Pi should verify
+what it downloaded instead of trusting the transfer, and that only works if every release is built
+the same way with the same set of artefacts. `make snapshot` produces all of it locally, and CI does
+the same on every push, so a packaging mistake surfaces before a tag rather than during one.
+
+On Raspberry Pi OS the `.deb` is preferable to the tarball: `apt install ./x1200_*_arm64.deb` leaves
+a record in dpkg, so anything auditing the machine later can see where the binary came from.
 
 The code is written functionally: every function is pure given its arguments, and the only impure
 thing in the program is the pair of closures `sysfs.OS` returns. That is what makes it testable with

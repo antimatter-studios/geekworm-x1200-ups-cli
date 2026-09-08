@@ -7,7 +7,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 #   make deploy HOST=pi@raspberrypi.local
 HOST ?= pi@raspberrypi.local
 
-.PHONY: all test cover vet fmt build arm64 deploy clean
+.PHONY: all test cover vet fmt build arm64 snapshot check-release deploy clean
 
 all: vet test build
 
@@ -34,6 +34,13 @@ arm64:
 deploy: arm64
 	scp dist/$(BINARY)-linux-arm64 $(HOST):/tmp/$(BINARY)
 	ssh $(HOST) 'sudo install -m 0755 /tmp/$(BINARY) /usr/local/bin/$(BINARY) && $(BINARY) --version'
+
+# Everything a release would produce, without publishing any of it. Same command CI runs.
+snapshot:
+	goreleaser release --snapshot --clean --skip=publish
+
+check-release:
+	goreleaser check
 
 clean:
 	rm -rf dist coverage.out
