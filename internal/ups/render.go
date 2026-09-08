@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/estimate"
 )
 
 // JSON renders the reading as machine-readable output.
@@ -27,15 +30,64 @@ func Text(r *Reading) string {
 	if r == nil {
 		return ""
 	}
-	lines := make([]string, 0, 3)
+	lines := make([]string, 0, 4)
 	if line := batteryLine(r.Battery); line != "" {
 		lines = append(lines, line)
 	}
 	lines = append(lines, powerLines(r.Power)...)
+	if line := estimateLine(r.Estimate); line != "" {
+		lines = append(lines, line)
+	}
 	if len(lines) == 0 {
 		return ""
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// estimateLine renders the time remaining, or why there is not one.
+//
+// An absent estimate is printed rather than omitted. Silence would be indistinguishable from the
+// feature not existing, and "not enough history yet" is a useful thing to be told — it means leave
+// it running, which is exactly what a reader needs to know.
+func estimateLine(e *estimate.Estimate) string {
+	if e == nil {
+		return ""
+	}
+	parts := []string{label("remaining")}
+	if e.TimeToEmpty != nil {
+		parts = append(parts, humanDuration(*e.TimeToEmpty))
+	} else {
+		parts = append(parts, "—")
+	}
+	if e.PercentPerHour != nil && e.State == estimate.Discharging {
+		parts = append(parts, fmt.Sprintf("%.1f%%/h", *e.PercentPerHour))
+	}
+	if e.Note != "" {
+		parts = append(parts, "("+e.Note+")")
+	} else if e.State != estimate.Discharging {
+		parts = append(parts, "("+string(e.State)+")")
+	}
+	return strings.Join(parts, "   ")
+}
+
+// humanDuration renders a duration the way somebody worried about a UPS wants to read it.
+//
+// Deliberately coarse. A Go Duration prints as "4h37m12.483s", and the seconds there are false
+// precision: the estimate behind them is a median of noisy slopes and is not accurate to the second,
+// so printing one invites more trust than the number deserves.
+func humanDuration(d time.Duration) string {
+	if d < 0 {
+		return "—"
+	}
+	if d < time.Minute {
+		return "under a minute"
+	}
+	hours := int(d.Hours())
+	mins := int(d.Minutes()) % 60
+	if hours == 0 {
+		return fmt.Sprintf("%dm", mins)
+	}
+	return fmt.Sprintf("%dh%02dm", hours, mins)
 }
 
 // batteryLine renders the gauge, or "" when there is none.

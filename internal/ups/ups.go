@@ -22,6 +22,7 @@ import (
 	"errors"
 	"path"
 
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/estimate"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/sysfs"
 )
 
@@ -64,6 +65,12 @@ type Power struct {
 type Reading struct {
 	Battery *Battery `json:"battery,omitempty"`
 	Power   *Power   `json:"power,omitempty"`
+	// Estimate is how long the pack has left, and is the one field Read does not populate.
+	//
+	// It cannot: a duration is derived from how the numbers have moved, which needs stored samples
+	// and a clock, and this package has neither by design. The caller records the sample and
+	// attaches the result, which keeps Read pure and keeps the estimator testable without a disk.
+	Estimate *estimate.Estimate `json:"estimate,omitempty"`
 }
 
 // ErrNoDevices is returned when neither driver is bound.

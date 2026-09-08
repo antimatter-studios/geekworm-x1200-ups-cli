@@ -8,6 +8,7 @@ $ x1200
 battery     95%   4.152 V   unknown
 power       5.06 V   0.267 A   1.34 W
           shunt 10.000 mOhm, drop 3 mV, ina219
+remaining   4h12m   -22.6%/h
 ```
 
 ```
@@ -18,6 +19,48 @@ $ x1200 --json
                "current_a": 0.267, "watts_w": 1.34, "shunt_ohms": 0.01 }
 }
 ```
+
+## Time remaining, and why the obvious method is wrong
+
+A single reading cannot answer "how long left" — the gauge reports a percentage and nothing about
+time — so this keeps a short history of samples and measures how fast the number is moving. The file
+lives in a tmpfs (`/tmp/x1200-history` by default, `--history` to move it, empty to disable). That is
+deliberate on both counts: writes never reach the SD card, which matters on a Pi that has already
+lost one card to write amplification, and the history is *meant* to vanish on reboot, because a rate
+measured before a power cycle describes a different machine from the one after it.
+
+Drawing a line between the first and last sample produces a confidently wrong answer, and it is
+wrong in the worst direction for the first few minutes of every power cut — which is exactly when
+somebody is reading it. Measured during a real mains failure:
+
+```
+21:22  94%      21:24  93%      21:25  92%      21:26  85%      21:29  80%
+```
+
+That is about 2%/min at the start and about 0.7%/min once settled. Most of the early drop is not
+capacity leaving the pack; it is a voltage-based gauge re-converging after the load stepped up. A
+naive fit across it reported **30 minutes** when the settled tail implied **over an hour**.
+
+Four things defend against that:
+
+- **A settling period is skipped** at the start of a run, because samples taken while the gauge is
+  still converging describe the gauge rather than the battery.
+- **The slope is a Theil-Sen estimator** — the median of all pairwise slopes — not a least-squares
+  fit. A median ignores a minority of wild samples; a mean is dragged by them.
+- **Pairs closer than a minute apart are discarded.** The percentage moves in whole steps, so two
+  samples seconds apart differ by 0% or 1%, and their slope is either zero or enormous.
+- **Deceleration is detected and reported.** The window is split in half and each half measured
+  separately; if the recent half is materially shallower the gauge is still converging, so the recent
+  figure is used and the output says `rate still settling; expect this to lengthen`.
+
+On the capture above, that is the difference between reporting 30 minutes and reporting
+`1h09m -68.6%/h (rate still settling; expect this to lengthen)` — where -68.6%/h is within a
+percentage point of the last measured segment. The full capture is a test fixture in
+`internal/estimate`, so any future change has to keep clearing it.
+
+A run ends when the direction reverses, so charging is never averaged against discharging, and a
+plateau does not end one — sitting at 80% for several samples while the voltage falls is normal on a
+gauge that reports whole numbers.
 
 ## It reads sysfs, not I2C
 
