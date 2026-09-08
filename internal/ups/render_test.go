@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/estimate"
 )
 
 func f(v float64) *float64 { return &v }
@@ -20,13 +22,44 @@ func sample() *Reading {
 
 func TestText(t *testing.T) {
 	got := Text(sample())
-	for _, want := range []string{"battery", "95%", "4.152 V", "unknown", "power", "5.06 V", "0.267 A", "1.34 W", "shunt 10.000 mOhm", "drop 3 mV", "ina219"} {
+	// Every value carries its own key: the old layout put them in columns and left the reader to
+	// guess, which failed worst on the gauge's status.
+	for _, want := range []string{
+		"battery", "charge:", "95%", "voltage:", "4.152 V", "state:",
+		"power", "bus:", "5.06 V", "current:", "0.267 A", "draw:", "1.34 W",
+		"shunt:", "10.000 mOhm", "drop 3 mV", "ina219",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Text missing %q:\n%s", want, got)
 		}
 	}
 	if !strings.HasSuffix(got, "\n") {
 		t.Error("Text did not end with a newline")
+	}
+}
+
+// Values line up in one column across every group, so the eye follows a single edge.
+func TestTextAlignsValuesAcrossGroups(t *testing.T) {
+	got := Text(sample())
+	col := -1
+	for _, line := range strings.Split(got, "\n") {
+		idx := strings.Index(line, ":")
+		if !strings.HasPrefix(line, "  ") || idx < 0 {
+			continue
+		}
+		// Position of the value, not of the colon: step past the colon, then over the padding.
+		rest := line[idx+1:]
+		at := idx + 1 + len(rest) - len(strings.TrimLeft(rest, " "))
+		if col == -1 {
+			col = at
+			continue
+		}
+		if at != col {
+			t.Errorf("value column %d != %d in %q", at, col, line)
+		}
+	}
+	if col == -1 {
+		t.Fatal("no key/value rows found")
 	}
 }
 
@@ -39,53 +72,116 @@ func TestTextNil(t *testing.T) {
 	}
 }
 
-func TestBatteryLine(t *testing.T) {
-	if got := batteryLine(nil); got != "" {
-		t.Errorf("batteryLine(nil) = %q", got)
+func TestBatteryRows(t *testing.T) {
+	if got := batteryRows(nil, nil); got != nil {
+		t.Errorf("batteryRows(nil) = %v", got)
 	}
-	// A gauge that cannot report a percentage must not render as 0%.
-	got := batteryLine(&Battery{Name: "battery", Status: "Unknown"})
-	if strings.Contains(got, "0%") || !strings.Contains(got, "?%") {
+	// A gauge that cannot report a percentage must not render as 0%: an unreadable gauge and a flat
+	// pack are opposite situations and only one is an emergency.
+	got := find(batteryRows(&Battery{Name: "battery", Status: "Unknown"}, nil), "charge")
+	if strings.Contains(got, "0%") {
 		t.Errorf("absent percentage rendered as %q", got)
 	}
-	// A flat pack must render as 0%, not as unknown.
-	if got := batteryLine(&Battery{Percent: i(0), Status: "Discharging"}); !strings.Contains(got, "0%") {
-		t.Errorf("zero percent rendered as %q", got)
+	if got := find(batteryRows(&Battery{Percent: i(0), Status: "Discharging"}, nil), "charge"); got != "0%" {
+		t.Errorf("zero percent rendered as %q; want 0%%", got)
 	}
-	if got := batteryLine(&Battery{Percent: i(50), Status: "Unknown", Present: b(false)}); !strings.Contains(got, "NO PACK FITTED") {
+	if got := find(batteryRows(&Battery{Percent: i(50), Status: "Unknown", Present: b(false)}, nil), "pack"); got != "NOT FITTED" {
 		t.Errorf("absent pack not flagged: %q", got)
 	}
-	if got := batteryLine(&Battery{Percent: i(50), Status: "Unknown", Present: b(true)}); strings.Contains(got, "NO PACK") {
+	if got := find(batteryRows(&Battery{Percent: i(50), Status: "Unknown", Present: b(true)}, nil), "pack"); got != "" {
 		t.Errorf("present pack wrongly flagged: %q", got)
 	}
 }
 
-func TestPowerLines(t *testing.T) {
-	if got := powerLines(nil); got != nil {
-		t.Errorf("powerLines(nil) = %v", got)
+// The gauge reads "unknown" forever on this hardware, so a bare "unknown" is the least useful thing
+// the tool could print. With no inference available it must at least explain itself.
+func TestBatteryStateExplainsAnUnknownGauge(t *testing.T) {
+	got := find(batteryRows(&Battery{Percent: i(80), Status: "Unknown"}, nil), "state")
+	if !strings.HasPrefix(got, "unknown") {
+		t.Fatalf("state = %q, want it to start with unknown", got)
 	}
-	lines := powerLines(sample().Power)
-	if len(lines) != 2 {
-		t.Fatalf("powerLines = %d lines; want 2 (rail, then the shunt it came from)", len(lines))
-	}
-	// With no shunt detail there is nothing to footnote, so the second line must not appear empty.
-	bare := powerLines(&Power{Name: "hwmon6", BusV: f(5), CurrentA: f(1), WattsW: f(5)})
-	if len(bare) != 1 {
-		t.Errorf("bare powerLines = %v; want a single line", bare)
+	if !strings.Contains(got, "cannot tell") {
+		t.Errorf("state = %q, want an explanation of why", got)
 	}
 }
 
-func TestLabel(t *testing.T) {
-	if got := label("battery"); len(got) != 10 {
-		t.Errorf("label(%q) = %q, width %d; want 10", "battery", got, len(got))
+// Printing "unknown" beside an estimate that says "discharging" contradicts itself. Where the
+// samples imply a direction, use it — labelled as inferred, because it is a weaker claim than a
+// hardware signal and must not be dressed up as one.
+func TestBatteryStateUsesTheInferredDirection(t *testing.T) {
+	rate := -20.0
+	e := &estimate.Estimate{State: estimate.Discharging, PercentPerHour: &rate}
+	got := find(batteryRows(&Battery{Percent: i(80), Status: "Unknown"}, e), "state")
+	if !strings.HasPrefix(got, "discharging") {
+		t.Fatalf("state = %q, want discharging", got)
 	}
-	if got := label(""); len(got) != 10 {
-		t.Errorf("label(\"\") width %d; want 10", len(got))
+	if !strings.Contains(got, "inferred") {
+		t.Errorf("state = %q, want it labelled as inferred rather than measured", got)
 	}
-	// Longer than the column still gets a separator rather than running into the value.
-	if got := label("aVeryLongLabel"); !strings.HasSuffix(got, " ") {
-		t.Errorf("label(long) = %q; want a trailing space", got)
+}
+
+// Steady is not evidence of either. A full pack on mains and a pack on battery that has not yet lost
+// a whole percent look identical, so neither may be claimed.
+func TestBatteryStateWillNotGuessFromSteady(t *testing.T) {
+	e := &estimate.Estimate{State: estimate.Steady}
+	got := find(batteryRows(&Battery{Percent: i(80), Status: "Unknown"}, e), "state")
+	if !strings.HasPrefix(got, "unknown") {
+		t.Errorf("state = %q; steady must not be read as a direction", got)
 	}
+}
+
+// A real status from the kernel is passed through untouched: the explanation is only for the
+// permanent "unknown" this hardware produces.
+func TestBatteryStatePassesARealStatusThrough(t *testing.T) {
+	got := find(batteryRows(&Battery{Percent: i(80), Status: "Discharging"}, nil), "state")
+	if got != "discharging" {
+		t.Errorf("state = %q, want the kernel's own word unadorned", got)
+	}
+}
+
+func TestPowerRows(t *testing.T) {
+	if got := powerRows(nil); got != nil {
+		t.Errorf("powerRows(nil) = %v", got)
+	}
+	rows := powerRows(sample().Power)
+	if len(rows) != 4 {
+		t.Fatalf("powerRows = %d; want bus, current, draw, shunt", len(rows))
+	}
+	// The shunt scales current and draw, so it is shown with the drop it was derived from.
+	shunt := find(rows, "shunt")
+	if !strings.Contains(shunt, "drop 3 mV") || !strings.Contains(shunt, "ina219") {
+		t.Errorf("shunt = %q; want the measured drop and the chip", shunt)
+	}
+	// With no shunt known there is nothing to footnote and no row to show.
+	bare := powerRows(&Power{Name: "hwmon6", BusV: f(5), CurrentA: f(1), WattsW: f(5)})
+	if find(bare, "shunt") != "" {
+		t.Errorf("bare powerRows invented a shunt: %v", bare)
+	}
+}
+
+func TestEstimateRows(t *testing.T) {
+	if got := estimateRows(nil); got != nil {
+		t.Errorf("estimateRows(nil) = %v", got)
+	}
+	// An absent estimate still prints, because silence is indistinguishable from the feature not
+	// existing, whereas the note tells a reader to leave it running.
+	rows := estimateRows(&estimate.Estimate{State: estimate.Unknown, Note: "not enough history yet"})
+	if find(rows, "note") == "" {
+		t.Error("an estimate with no duration must still say why")
+	}
+	if find(rows, "remaining") != "" {
+		t.Error("no duration should be rendered when there is none")
+	}
+}
+
+// find returns the value of a row by key, or "" when absent.
+func find(rows []row, key string) string {
+	for _, r := range rows {
+		if r.key == key {
+			return r.value
+		}
+	}
+	return ""
 }
 
 func TestJSON(t *testing.T) {

@@ -200,7 +200,7 @@ func TestOnceWithoutAStoreStillReportsTheBattery(t *testing.T) {
 	if !strings.Contains(got, "95%") {
 		t.Errorf("output lost the battery: %q", got)
 	}
-	if strings.Contains(got, "remaining") {
+	if strings.Contains(got, "estimate") {
 		t.Errorf("estimate rendered with no store configured: %q", got)
 	}
 }
@@ -211,8 +211,8 @@ func TestOnceWithOneSampleSaysItNeedsMore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "remaining") {
-		t.Fatalf("no estimate line at all: %q", got)
+	if !strings.Contains(got, "estimate") {
+		t.Fatalf("no estimate group at all: %q", got)
 	}
 	if !strings.Contains(got, "history") && !strings.Contains(got, "not enough") {
 		t.Errorf("first reading should explain the absent estimate: %q", got)
@@ -236,11 +236,8 @@ func TestDischargeProducesATimeRemaining(t *testing.T) {
 		out = text
 	}
 
-	if !strings.Contains(out, "remaining") {
-		t.Fatalf("no estimate after 40 samples: %q", out)
-	}
-	if strings.Contains(out, "—") {
-		t.Errorf("still no duration after 40 minutes of discharge: %q", out)
+	if !strings.Contains(out, "remaining:") {
+		t.Fatalf("no duration after 40 samples: %q", out)
 	}
 	// 60% left at 30%/hour is about two hours. Allow a wide band: the point is that it is a
 	// believable number in hours, not that it is exact.

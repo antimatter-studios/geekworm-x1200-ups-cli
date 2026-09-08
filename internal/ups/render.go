@@ -25,49 +25,187 @@ func JSON(r *Reading) (string, error) {
 	return string(out) + "\n", nil
 }
 
+// row is one labelled value.
+type row struct{ key, value string }
+
+// group is a named set of rows, rendered as a block.
+type group struct {
+	name string
+	rows []row
+}
+
 // Text renders the reading for a person.
+//
+// Every value carries its own key. The earlier layout put values in columns and left the reader to
+// work out what each one was, which failed on the gauge's status in particular: a bare "unknown"
+// sitting at the end of a line gives no clue that it is describing charge direction, and this
+// hardware prints it every single time.
+//
+// Keys are aligned across all groups rather than within each one, so the values form a single
+// column down the page and the eye has one thing to follow rather than three.
 func Text(r *Reading) string {
 	if r == nil {
 		return ""
 	}
-	lines := make([]string, 0, 4)
-	if line := batteryLine(r.Battery); line != "" {
-		lines = append(lines, line)
+	groups := []group{
+		{name: "battery", rows: batteryRows(r.Battery, r.Estimate)},
+		{name: "power", rows: powerRows(r.Power)},
+		{name: "estimate", rows: estimateRows(r.Estimate)},
 	}
-	lines = append(lines, powerLines(r.Power)...)
-	if line := estimateLine(r.Estimate); line != "" {
-		lines = append(lines, line)
+
+	width := 0
+	for _, g := range groups {
+		for _, row := range g.rows {
+			if n := len(row.key); n > width {
+				width = n
+			}
+		}
 	}
-	if len(lines) == 0 {
+	if width == 0 {
 		return ""
 	}
-	return strings.Join(lines, "\n") + "\n"
+
+	var blocks []string
+	for _, g := range groups {
+		if len(g.rows) == 0 {
+			continue
+		}
+		lines := []string{g.name}
+		for _, row := range g.rows {
+			// +1 for the colon, so the values align rather than the keys.
+			lines = append(lines, fmt.Sprintf("  %-*s %s", width+1, row.key+":", row.value))
+		}
+		blocks = append(blocks, strings.Join(lines, "\n"))
+	}
+	if len(blocks) == 0 {
+		return ""
+	}
+	return strings.Join(blocks, "\n\n") + "\n"
 }
 
-// estimateLine renders the time remaining, or why there is not one.
+// unknownStatus is what the kernel reports for this gauge, permanently.
+const unknownStatus = "unknown"
+
+// inferred returns the direction the samples imply, or Unknown when they imply nothing.
 //
-// An absent estimate is printed rather than omitted. Silence would be indistinguishable from the
-// feature not existing, and "not enough history yet" is a useful thing to be told — it means leave
-// it running, which is exactly what a reader needs to know.
-func estimateLine(e *estimate.Estimate) string {
+// Only a definite direction counts. Steady means the percentage has not moved, which on a pack that
+// is genuinely on mains and full looks identical to one on battery that has not yet lost a whole
+// percent — so it is not evidence of either and must not be presented as though it were.
+func inferred(e *estimate.Estimate) estimate.State {
 	if e == nil {
-		return ""
+		return estimate.Unknown
 	}
-	parts := []string{label("remaining")}
-	if e.TimeToEmpty != nil {
-		parts = append(parts, humanDuration(*e.TimeToEmpty))
+	switch e.State {
+	case estimate.Discharging, estimate.Charging:
+		return e.State
+	}
+	return estimate.Unknown
+}
+
+// batteryRows renders the gauge.
+//
+// The estimate is passed in for one reason: the gauge's own status field reads "unknown" on this
+// hardware permanently, and printing that beside an estimate that has worked out the direction from
+// the samples is contradictory on its face. Where the samples imply a direction, say so and label it
+// as inferred — it is a weaker claim than a hardware signal and must not be dressed up as one.
+//
+// This is a stand-in. The X1200 reports mains presence on GPIO6, which is instant and authoritative
+// where an inference needs minutes of history and cannot distinguish a pack sitting full on mains
+// from one on battery that has not yet dropped a percent. Once that pin is read, it supersedes this.
+func batteryRows(b *Battery, e *estimate.Estimate) []row {
+	if b == nil {
+		return nil
+	}
+	rows := make([]row, 0, 4)
+	if b.Percent != nil {
+		rows = append(rows, row{"charge", fmt.Sprintf("%d%%", *b.Percent)})
 	} else {
-		parts = append(parts, "—")
+		// Distinct from 0%: the gauge cannot say, which is not the same as an empty pack.
+		rows = append(rows, row{"charge", "unreadable"})
+	}
+	if b.VoltageV != nil {
+		rows = append(rows, row{"voltage", fmt.Sprintf("%.3f V", *b.VoltageV)})
+	}
+
+	state := strings.ToLower(b.Status)
+	if state == unknownStatus {
+		switch inferred(e) {
+		case estimate.Discharging:
+			state = "discharging — inferred from samples, not measured"
+		case estimate.Charging:
+			state = "charging — inferred from samples, not measured"
+		default:
+			// Explained inline because it never improves on its own and is otherwise the most
+			// confusing thing in the output. A fuel gauge measures charge; direction is the
+			// charger's business, and there is no charger chip on the bus to ask.
+			state += " — gauge cannot tell charging from discharging"
+		}
+	}
+	rows = append(rows, row{"state", state})
+
+	if b.Present != nil && !*b.Present {
+		rows = append(rows, row{"pack", "NOT FITTED"})
+	}
+	return rows
+}
+
+// powerRows renders the rail.
+//
+// The shunt is shown with the measurement it came from because it is the one number that silently
+// scales the three above it: current and draw are both derived from the drop divided by this
+// resistance, so a reader whose wattage looks wrong can see what it was divided by without going
+// looking for it.
+func powerRows(p *Power) []row {
+	if p == nil {
+		return nil
+	}
+	rows := make([]row, 0, 4)
+	if p.BusV != nil {
+		rows = append(rows, row{"bus", fmt.Sprintf("%.2f V", *p.BusV)})
+	}
+	if p.CurrentA != nil {
+		rows = append(rows, row{"current", fmt.Sprintf("%.3f A", *p.CurrentA)})
+	}
+	if p.WattsW != nil {
+		rows = append(rows, row{"draw", fmt.Sprintf("%.2f W", *p.WattsW)})
+	}
+	if p.ShuntOhms != nil {
+		detail := make([]string, 0, 2)
+		if p.ShuntMV != nil {
+			detail = append(detail, fmt.Sprintf("drop %.0f mV", *p.ShuntMV))
+		}
+		if p.Chip != "" {
+			detail = append(detail, p.Chip)
+		}
+		value := fmt.Sprintf("%.3f mOhm", *p.ShuntOhms*1000)
+		if len(detail) > 0 {
+			value += "  (" + strings.Join(detail, ", ") + ")"
+		}
+		rows = append(rows, row{"shunt", value})
+	}
+	return rows
+}
+
+// estimateRows renders the time remaining, or why there is not one.
+//
+// An absent estimate is still printed. Silence would be indistinguishable from the feature not
+// existing, whereas "not enough history yet" tells a reader to leave it running, which is exactly
+// what they need to know.
+func estimateRows(e *estimate.Estimate) []row {
+	if e == nil {
+		return nil
+	}
+	rows := []row{{"state", string(e.State)}}
+	if e.TimeToEmpty != nil {
+		rows = append(rows, row{"remaining", humanDuration(*e.TimeToEmpty)})
 	}
 	if e.PercentPerHour != nil && e.State == estimate.Discharging {
-		parts = append(parts, fmt.Sprintf("%.1f%%/h", *e.PercentPerHour))
+		rows = append(rows, row{"rate", fmt.Sprintf("%.1f%%/h", *e.PercentPerHour)})
 	}
 	if e.Note != "" {
-		parts = append(parts, "("+e.Note+")")
-	} else if e.State != estimate.Discharging {
-		parts = append(parts, "("+string(e.State)+")")
+		rows = append(rows, row{"note", e.Note})
 	}
-	return strings.Join(parts, "   ")
+	return rows
 }
 
 // humanDuration renders a duration the way somebody worried about a UPS wants to read it.
@@ -88,71 +226,4 @@ func humanDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm", mins)
 	}
 	return fmt.Sprintf("%dh%02dm", hours, mins)
-}
-
-// batteryLine renders the gauge, or "" when there is none.
-func batteryLine(b *Battery) string {
-	if b == nil {
-		return ""
-	}
-	parts := []string{label("battery")}
-	if b.Percent != nil {
-		parts = append(parts, fmt.Sprintf("%3d%%", *b.Percent))
-	} else {
-		parts = append(parts, "  ?%")
-	}
-	if b.VoltageV != nil {
-		parts = append(parts, fmt.Sprintf("%.3f V", *b.VoltageV))
-	}
-	parts = append(parts, strings.ToLower(b.Status))
-	if b.Present != nil && !*b.Present {
-		parts = append(parts, "NO PACK FITTED")
-	}
-	return strings.Join(parts, "   ")
-}
-
-// powerLines renders the rail, and separately the shunt it was derived from.
-//
-// The shunt gets its own line because it is the one number that silently scales the three above it.
-// Anyone reading a wattage that looks wrong should be able to see what it was divided by without
-// going looking.
-func powerLines(p *Power) []string {
-	if p == nil {
-		return nil
-	}
-	parts := []string{label("power")}
-	if p.BusV != nil {
-		parts = append(parts, fmt.Sprintf("%.2f V", *p.BusV))
-	}
-	if p.CurrentA != nil {
-		parts = append(parts, fmt.Sprintf("%.3f A", *p.CurrentA))
-	}
-	if p.WattsW != nil {
-		parts = append(parts, fmt.Sprintf("%.2f W", *p.WattsW))
-	}
-	lines := []string{strings.Join(parts, "   ")}
-
-	detail := make([]string, 0, 3)
-	if p.ShuntOhms != nil {
-		detail = append(detail, fmt.Sprintf("shunt %.3f mOhm", *p.ShuntOhms*1000))
-	}
-	if p.ShuntMV != nil {
-		detail = append(detail, fmt.Sprintf("drop %.0f mV", *p.ShuntMV))
-	}
-	if p.Chip != "" {
-		detail = append(detail, p.Chip)
-	}
-	if len(detail) > 0 {
-		lines = append(lines, label("")+strings.Join(detail, ", "))
-	}
-	return lines
-}
-
-// label pads a row's first column so the values line up.
-func label(name string) string {
-	const width = 10
-	if len(name) >= width {
-		return name + " "
-	}
-	return name + strings.Repeat(" ", width-len(name))
 }
