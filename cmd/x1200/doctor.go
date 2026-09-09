@@ -134,6 +134,8 @@ func doctorCommand(args []string, out, errOut io.Writer, port gpio.Port, run pmi
 		}
 	}
 
+	checks = append(checks, shadowedUnits(fileExists)...)
+
 	// Only needed by calibration, so its absence is not a fault on a machine that is not a Pi.
 	if got, err := pmic.Read(run); err == nil {
 		checks = append(checks, check{name: "pi power sensors", ok: true,
@@ -190,4 +192,52 @@ func percentOf(b *ups.Battery) string {
 		return "no percentage"
 	}
 	return fmt.Sprintf("%d%%", *b.Percent)
+}
+
+// unitPaths are the two places this program's units can end up, in systemd's own precedence order.
+//
+// A package installs into /lib; a machine's own configuration goes in /etc. systemd prefers /etc,
+// which is the whole point of the split and also the trap below.
+var unitPaths = []struct{ etc, lib string }{
+	{"/etc/systemd/system/x1200.service", "/lib/systemd/system/x1200.service"},
+	{"/etc/systemd/system/x1200.timer", "/lib/systemd/system/x1200.timer"},
+}
+
+// shadowedUnits reports a packaged unit that has been silently overridden.
+//
+// This is the failure worth catching because it is invisible. /etc wins over /lib, so a unit written
+// into /etc replaces the packaged one permanently — while dpkg goes on owning its copy, package
+// upgrades go on replacing it, and none of that has any effect. Ship a corrected unit in a new
+// release and the machine keeps running the stale override, with nothing anywhere to say why.
+//
+// It is worse than two resources racing for one path, which at least announces itself by being
+// non-deterministic. This is deterministic and quiet.
+//
+// The remedy is a drop-in rather than a replacement. /etc/systemd/system/x1200.service.d/*.conf
+// composes with the packaged unit instead of hiding it, so an override survives upgrades and an
+// upgrade survives the override.
+func shadowedUnits(exists func(string) bool) []check {
+	var out []check
+	for _, u := range unitPaths {
+		if !exists(u.etc) || !exists(u.lib) {
+			continue
+		}
+		name := u.etc[strings.LastIndex(u.etc, "/")+1:]
+		out = append(out, check{
+			name:   "unit shadowing",
+			detail: fmt.Sprintf("%s exists in BOTH /etc and /lib; the /etc copy wins and the packaged one is inert", name),
+			fix: "systemd prefers /etc over /lib, so package upgrades to " + u.lib + " will have no effect\n" +
+				"        while " + u.etc + " exists. Either delete the /etc copy and let the package own the\n" +
+				"        unit, or replace it with a drop-in that composes instead of hiding:\n" +
+				"          /etc/systemd/system/" + name + ".d/override.conf",
+		})
+	}
+	return out
+}
+
+// fileExists is the real predicate, separated so the shadowing logic can be tested without writing
+// into /etc on the machine running the tests.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

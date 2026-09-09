@@ -386,3 +386,42 @@ func TestCorroborateNeedsBothSources(t *testing.T) {
 		}
 	}
 }
+
+// The failure worth catching because it is invisible: systemd prefers /etc over /lib, so a unit
+// written into /etc overrides the packaged one permanently while dpkg goes on owning and upgrading
+// a file that has no effect.
+func TestDoctorCatchesAShadowedUnit(t *testing.T) {
+	both := func(string) bool { return true }
+	got := shadowedUnits(both)
+	if len(got) != 2 {
+		t.Fatalf("got %d checks, want one per unit", len(got))
+	}
+	for _, c := range got {
+		if c.ok {
+			t.Error("shadowing reported as ok")
+		}
+		if !strings.Contains(c.detail, "inert") {
+			t.Errorf("detail = %q; want it to say the packaged unit does nothing", c.detail)
+		}
+		// A drop-in composes with the packaged unit instead of hiding it, which is the actual
+		// remedy — deleting the override is only half the answer if someone needed the change.
+		if !strings.Contains(c.fix, ".d/override.conf") {
+			t.Errorf("fix = %q; want it to name the drop-in path", c.fix)
+		}
+	}
+}
+
+// Only one copy is the normal case, whichever it is, and must not warn.
+func TestDoctorIgnoresASingleUnitCopy(t *testing.T) {
+	onlyLib := func(p string) bool { return strings.HasPrefix(p, "/lib") }
+	if got := shadowedUnits(onlyLib); len(got) != 0 {
+		t.Errorf("packaged-only install warned: %+v", got)
+	}
+	onlyEtc := func(p string) bool { return strings.HasPrefix(p, "/etc") }
+	if got := shadowedUnits(onlyEtc); len(got) != 0 {
+		t.Errorf("hand-installed-only warned: %+v", got)
+	}
+	if got := shadowedUnits(func(string) bool { return false }); len(got) != 0 {
+		t.Errorf("no units at all warned: %+v", got)
+	}
+}

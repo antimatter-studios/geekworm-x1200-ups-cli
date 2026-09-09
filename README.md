@@ -357,6 +357,31 @@ $ x1200 doctor
 Every failing check names its remedy. A diagnostic that reports a problem without saying what to do
 about it has moved the work rather than done it.
 
+### One check worth knowing about: unit shadowing
+
+The `.deb` installs its units to `/lib/systemd/system`, because that is where packaged units belong.
+A machine's own configuration goes in `/etc/systemd/system` — **and systemd prefers `/etc`.**
+
+So a unit written into `/etc` does not race the packaged one, it overrides it permanently and
+silently. dpkg goes on owning its copy, package upgrades go on replacing it, and none of that has
+any effect. Ship a corrected unit in a new release and the machine keeps running the stale override
+with nothing anywhere to say why. That is worse than two things racing for one path, which at least
+announces itself by being non-deterministic.
+
+`doctor` reports it when both copies exist, and names the remedy:
+
+```
+[FAIL] unit shadowing   x1200.timer exists in BOTH /etc and /lib; the /etc copy wins
+                        and the packaged one is inert
+                  → Either delete the /etc copy and let the package own the unit, or
+                    replace it with a drop-in that composes instead of hiding:
+                      /etc/systemd/system/x1200.timer.d/override.conf
+```
+
+A drop-in is the right answer if the change was wanted: it composes with the packaged unit, so the
+override survives upgrades and the upgrade survives the override. Configuration management should own
+*whether the timer runs*, not the file's contents.
+
 Failures are ranked, not merely listed: a check marked `STOP` means the tool cannot report anything
 useful and exits non-zero, while `FAIL` costs a feature and exits zero. `/dev/i2c-1` is deliberately
 *not* required — this tool reads sysfs, so it needs the drivers bound; that device node is what
