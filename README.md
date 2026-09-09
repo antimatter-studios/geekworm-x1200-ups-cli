@@ -285,7 +285,7 @@ delivered
 
 ```
 delivered
-  mean current:  0.520 A
+  ina219 mean:   0.520 A
   measured over: 20m of 20m elapsed
   WITHHELD:      charge and energy need the current's circuit identified; on this board
                  the INA219 does not track the Pi's load (525mA idle, 267mA at full
@@ -310,7 +310,7 @@ So the signal is real, stable and correctly read — and **unidentified**. Turni
 hours and then into an implied pack capacity would produce confident figures from a current whose
 circuit nobody can name, which is worse than reporting nothing, because it looks like a measurement.
 
-The mean current and the coverage are still shown: those are facts about the signal rather than
+The instrument's mean and the coverage are still shown: those are facts about the signal rather than
 interpretations of it, and hiding them would conceal the evidence that anything is being measured at
 all. The totals need `--trust-current`, which is a claim the operator makes and the tool cannot.
 
@@ -382,8 +382,29 @@ A drop-in is the right answer if the change was wanted: it composes with the pac
 override survives upgrades and the upgrade survives the override. Configuration management should own
 *whether the timer runs*, not the file's contents.
 
-Failures are ranked, not merely listed: a check marked `STOP` means the tool cannot report anything
-useful and exits non-zero, while `FAIL` costs a feature and exits zero. `/dev/i2c-1` is deliberately
+Failures are ranked, not merely listed, and there are three severities because they make three
+different claims:
+
+| | meaning |
+|---|---|
+| `STOP` | the tool cannot report anything useful; exits non-zero |
+| `FAIL ` | you have configured something wrongly, and here is the correction; exits zero |
+| `known` | a limitation of the hardware that no configuration will change |
+
+The third exists so that `FAIL` keeps its meaning. The shunt being uncalibrated is a repair somebody
+can make; the INA219's circuit being undocumented is not. Putting both under one label dilutes the
+checks that can be acted on, and a reader who cannot tell them apart learns to skim both. A `known`
+entry still carries an instruction — it just is not a repair:
+
+```
+[known] current source    the INA219 does not track the Pi's load, so its circuit is unidentified
+                          → charge, energy and implied capacity are withheld because of this —
+                            that is deliberate, not a fault. Do not pass --trust-current until
+                            you have established what the current measures.
+```
+
+Known limitations are counted separately in the summary, so "nothing is misconfigured" stays sayable
+on a machine that still has an undocumented sensor on it. `/dev/i2c-1` is deliberately
 *not* required — this tool reads sysfs, so it needs the drivers bound; that device node is what
 `i2cdetect` uses. A check that called a working system broken would teach you to ignore the report.
 

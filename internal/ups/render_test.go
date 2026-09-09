@@ -306,7 +306,7 @@ func TestDeliveredRowsAreSeparateFromTheGauge(t *testing.T) {
 	if find(rows, "charge") != "123.4 mAh" {
 		t.Errorf("charge = %q", find(rows, "charge"))
 	}
-	if find(rows, "energy") == "" || find(rows, "mean current") == "" {
+	if find(rows, "energy") == "" || find(rows, "ina219 mean") == "" {
 		t.Errorf("rows = %+v", rows)
 	}
 	// Both times always, so a reader can see whether the total covers the period it appears to.
@@ -362,8 +362,8 @@ func TestDeliveredWithholdsTotalsWhileTheCurrentIsUnidentified(t *testing.T) {
 	}
 	// The mean and the coverage are facts about the signal rather than interpretations of it, so
 	// they stand: withholding them would hide the evidence that something is being measured at all.
-	if find(rows, "mean current") == "" {
-		t.Error("the mean current was withheld; it is a fact about the signal, not an interpretation")
+	if find(rows, "ina219 mean") == "" {
+		t.Error("the instrument mean was withheld; it is a fact about the signal, not an interpretation")
 	}
 	if find(rows, "measured over") == "" {
 		t.Error("coverage was withheld")

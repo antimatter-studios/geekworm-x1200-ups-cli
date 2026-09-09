@@ -27,6 +27,14 @@ type check struct {
 	// fatal marks a check whose failure stops the tool working at all, as against one that costs a
 	// feature. The distinction is what turns a list into a priority.
 	fatal bool
+	// known marks a limitation of the hardware rather than a misconfiguration.
+	//
+	// A third severity exists because FAIL carries a specific meaning — you have set this up wrongly
+	// and here is the correction — and a known limitation is a different claim. Putting the two under
+	// one label dilutes the checks somebody can actually act on: the shunt being uncalibrated is a
+	// repair, while the INA219's circuit being undocumented is not, and a reader who cannot tell
+	// them apart learns to skim both.
+	known bool
 }
 
 // doctorCommand reports whether the prerequisites are in place.
@@ -136,6 +144,22 @@ func doctorCommand(args []string, out, errOut io.Writer, port gpio.Port, run pmi
 
 	checks = append(checks, shadowedUnits(fileExists)...)
 
+	// A known limitation, not a misconfiguration, and reported for a reason an operator can act on:
+	// stop looking for the charge figures, and do not reach for --trust-current casually. Measured on
+	// hardware, the INA219 read 525 mA idle and 267 mA at full load, was flat across a mains
+	// transition, and decays to a fixed floor of about 267 regardless of what the machine is doing.
+	// Geekworm documents neither the chip nor its shunt and publish no schematic.
+	if readErr == nil && reading.Power != nil {
+		checks = append(checks, check{
+			name: "current source", known: true,
+			detail: "the INA219 does not track the Pi's load, so its circuit is unidentified",
+			fix: "charge, energy and implied capacity are withheld because of this — that is deliberate,\n" +
+				"        not a fault. Do not pass --trust-current until you have established what the\n" +
+				"        current measures; a confident mAh figure from an unidentified signal is worse\n" +
+				"        than none, because it looks like a measurement.",
+		})
+	}
+
 	// Only needed by calibration, so its absence is not a fault on a machine that is not a Pi.
 	if got, err := pmic.Read(run); err == nil {
 		checks = append(checks, check{name: "pi power sensors", ok: true,
@@ -154,34 +178,50 @@ func doctorCommand(args []string, out, errOut io.Writer, port gpio.Port, run pmi
 		}
 	}
 
-	var failed, fatal int
+	var failed, fatal, known int
 	for _, c := range checks {
-		mark := "FAIL"
-		if c.ok {
+		var mark string
+		switch {
+		case c.ok:
 			mark = " ok "
-		} else {
+		case c.known:
+			// Neither passing nor broken: true, unfixable, and worth knowing.
+			known++
+			mark = "known"
+		case c.fatal:
 			failed++
-			if c.fatal {
-				fatal++
-				mark = "STOP"
-			}
+			fatal++
+			mark = "STOP"
+		default:
+			failed++
+			mark = "FAIL"
 		}
-		fmt.Fprintf(out, "[%s] %-*s  %s\n", mark, width, c.name, c.detail)
+		fmt.Fprintf(out, "[%-5s] %-*s  %s\n", mark, width, c.name, c.detail)
 		if !c.ok && c.fix != "" {
-			fmt.Fprintf(out, "       %s→ %s\n", strings.Repeat(" ", width-5), c.fix)
+			fmt.Fprint(out, indent(c.fix, width))
 		}
 	}
 
 	fmt.Fprintln(out)
+	// Known limitations are counted apart from failures throughout, so that "nothing is misconfigured"
+	// stays sayable on a machine that still has an undocumented sensor on it.
+	suffix := ""
+	if known > 0 {
+		word := "limitation"
+		if known > 1 {
+			word += "s"
+		}
+		suffix = fmt.Sprintf(" %d known %s, which no configuration will change.", known, word)
+	}
 	switch {
 	case fatal > 0:
-		fmt.Fprintf(out, "%d of %d checks failed, %d of them fatal: the tool cannot report anything useful yet.\n", failed, len(checks), fatal)
+		fmt.Fprintf(out, "%d of %d checks failed, %d of them fatal: the tool cannot report anything useful yet.%s\n", failed, len(checks), fatal, suffix)
 		return fmt.Errorf("%d fatal prerequisite(s) missing", fatal)
 	case failed > 0:
-		fmt.Fprintf(out, "%d of %d checks failed. The tool works, but some readings are missing or unscaled.\n", failed, len(checks))
+		fmt.Fprintf(out, "%d of %d checks failed. The tool works, but some readings are missing or unscaled.%s\n", failed, len(checks), suffix)
 		return nil
 	default:
-		fmt.Fprintf(out, "All %d checks passed.\n", len(checks))
+		fmt.Fprintf(out, "Nothing is misconfigured.%s\n", suffix)
 		return nil
 	}
 }
@@ -233,6 +273,26 @@ func shadowedUnits(exists func(string) bool) []check {
 		})
 	}
 	return out
+}
+
+// indent renders a fix under its check, wrapping continuation lines to line up with the first.
+//
+// Computed rather than baked into each fix string, which is what broke when the severity marker
+// changed width: an indentation constant embedded in prose is a constant nobody remembers to revisit.
+func indent(fix string, width int) string {
+	// "[known] " plus the name column, plus two spaces, is where the detail begins.
+	lead := strings.Repeat(" ", len("[known] ")+width+2)
+	lines := strings.Split(fix, "\n")
+	var b strings.Builder
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if i == 0 {
+			fmt.Fprintf(&b, "%s→ %s\n", lead, line)
+			continue
+		}
+		fmt.Fprintf(&b, "%s  %s\n", lead, line)
+	}
+	return b.String()
 }
 
 // fileExists is the real predicate, separated so the shadowing logic can be tested without writing

@@ -245,7 +245,11 @@ func deliveredRows(d *Delivered) []row {
 	}
 	// The mean and the coverage describe the signal; the totals interpret it. Only the first pair can
 	// be stated while the current's circuit is unknown.
-	rows := []row{{"mean current", fmt.Sprintf("%.3f A", d.MeanCurrentA)}}
+	// Named after the instrument rather than the quantity, deliberately. "mean current" reads as the
+	// system's current draw, which is the exact claim that cannot be made here — the withheld block
+	// beneath explains why, but a reader scanning only the numbers must not come away with a figure
+	// for something the tool has just said it cannot identify.
+	rows := []row{{"ina219 mean", fmt.Sprintf("%.3f A", d.MeanCurrentA)}}
 	if d.Unverified == "" {
 		rows = append(rows,
 			row{"charge", fmt.Sprintf("%.1f mAh", d.MilliampHours)},
