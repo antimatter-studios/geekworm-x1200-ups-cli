@@ -122,14 +122,22 @@ gauge that reports whole numbers.
 | `--root` | `/sys` | sysfs root, for running against captured files |
 | `--version` | | one-line identity; `x1200 version` for detail |
 
-Subcommands: `version`, `systemd` (print the units), `record` (take one sample and append it).
+Subcommands:
+
+| command | what it does |
+|---|---|
+| `version` | what this binary is, and whether it is a release or a local build |
+| `doctor` | check the prerequisites, and name the fix for each that is missing |
+| `calibrate` | fit the shunt resistance against the Pi's own power sensors |
+| `record` | take one sample and append it to the store; what the timer runs |
+| `systemd` | print the service and timer units |
 
 `--root` is what makes this testable without hardware: point it at a directory of captured sysfs
 files and the whole program runs on any machine.
 
 ## How it is put together
 
-Nine packages, each with one job, and the split follows a single rule: anything impure is injected
+Eleven packages, each with one job, and the split follows a single rule: anything impure is injected
 so that the logic can be tested against a map literal on a laptop with no Raspberry Pi attached.
 
 | package | responsibility |
@@ -141,6 +149,8 @@ so that the logic can be tested against a map literal on a laptop with no Raspbe
 | `gpio` | the Linux GPIO character device, by ioctl, with no external dependency |
 | `x1200` | the pin numbers and polarities specific to this board |
 | `coulomb` | integrates measured current into charge actually delivered |
+| `calibrate` | fits the shunt resistance from a second, independent instrument |
+| `pmic` | reads the Pi's own power sensors, the only vendor-tool dependency |
 | `service` | the systemd units, and the single source of truth for them |
 | `build` | what this binary is and where it came from |
 
@@ -280,6 +290,102 @@ those would agree. Where they diverge the declared figure is the suspect one —
 around 3500 mAh per cell, so cells sold as 5000 mAh are overstated, and this says by how much
 instead of leaving it a suspicion. A capacity is never inferred: pass `--capacity-mah` or the runtime
 line is simply absent.
+
+## Checking the setup: `x1200 doctor`
+
+Every failure mode in this tool is silent by design, and that is the right behaviour taken one at a
+time: an unreadable GPIO means the `supply` group is absent rather than wrong, an unbound driver
+means the battery is absent rather than zero, and inventing a value in either case would be worse.
+Taken together, though, it leaves no way to tell "this is fine" from "this has never worked".
+
+```
+$ x1200 doctor
+[ ok ] i2c device        /dev/i2c-1 present, so i2cdetect works
+[ ok ] fuel gauge        battery bound, reading 84%
+[ ok ] power monitor     ina219 bound
+[FAIL] shunt resistance  10.000 mOhm — the ina2xx default, provably wrong on this board
+                  → every current, power, mAh and Wh figure is scaled by this, likely ~2x low.
+                    run `x1200 calibrate` to fit it against the Pi's own sensors.
+[FAIL] mains detection   GPIO6 not readable
+                  → add `gpio=6=ip,pu` to /boot/firmware/config.txt and reboot. An unconfigured
+                    line has no level at all — `pinctrl get 6` shows `--` — so no amount of
+                    polling will catch an edge.
+[ ok ] pi power sensors  5 rails, 2.73 W total
+
+2 of 6 checks failed. The tool works, but some readings are missing or unscaled.
+```
+
+Every failing check names its remedy. A diagnostic that reports a problem without saying what to do
+about it has moved the work rather than done it.
+
+Failures are ranked, not merely listed: a check marked `STOP` means the tool cannot report anything
+useful and exits non-zero, while `FAIL` costs a feature and exits zero. `/dev/i2c-1` is deliberately
+*not* required — this tool reads sysfs, so it needs the drivers bound; that device node is what
+`i2cdetect` uses. A check that called a working system broken would teach you to ignore the report.
+
+## Calibrating the shunt: `x1200 calibrate`
+
+The shunt resistance is the one constant that silently scales everything. Current, power, mAh and Wh
+are all a voltage drop divided by it, so a wrong value is wrong everywhere by the same factor and
+**nothing in the output contradicts it**. The `ina2xx` driver defaults to 10 mΩ, and here that is not
+merely unverified but provably wrong: it implies 1.34 W entering a board whose own PMIC reports
+2.73 W delivered to rails downstream of it, and input cannot be less than what it feeds.
+
+The Pi's PMIC is the way out. It reports per-rail voltage and current through firmware, sharing no
+chip, bus or driver with the INA219 — which is the only reason comparing them is worth anything. Two
+readings from the same sensor agreeing proves nothing.
+
+```
+$ x1200 calibrate
+Sampling the INA219 against the Pi's PMIC, 12 times 2s apart.
+Vary the load while this runs — `yes > /dev/null` on a few cores, then stop them.
+A calibration taken entirely at idle constrains the answer barely at all.
+
+   1/12  drop  2.67 mV   rail 5.087 V   pmic 2.730 W
+   ...
+
+fitted shunt resistance
+  from slope:    5.1240 mOhm   <- prefer this; a fixed offset cannot bias it
+  from mean:     5.3020 mOhm
+  nearest part:  5.0000 mOhm   (2.5% away)
+  points:        12 over 0.893 A of load range
+  spread:        6.2%
+```
+
+Four things about that output are deliberate.
+
+**The slope is the headline, not the average.** Fitting how the drop *grows* with current makes the
+answer immune to any fixed offset — the HAT's own quiescent draw, for instance — which an average
+absorbs into the result. Both are printed because their *disagreement* is itself the evidence that
+such an offset exists.
+
+**The spread is the confidence signal.** Two instruments that agree at every load level produce a
+tight spread; one that disagrees produces a wide one. Above 25% the tool says to treat the figure as
+indicative only, and if the drop does not grow with load at all it refuses to offer a value, because
+that is not a resistor.
+
+**A single point is not a calibration.** Fewer than three is rejected outright: two sensors can agree
+once by accident. So is a run taken entirely at idle, however many samples it contains — the load
+range is printed so you can see whether you actually varied it.
+
+**The bias is stated, because it cannot be removed.** The PMIC measures power *downstream* of the
+shunt, so true input power is higher by the converter's efficiency, and this fit is therefore biased
+high by roughly that factor — perhaps 5–10%. Nothing here can measure efficiency, so the honest move
+is to name the error rather than quietly carry it.
+
+### It prints; it does not apply
+
+```
+Nothing has been changed. To use it, either declare it where this machine is
+described, or set it directly:
+
+  echo 5000 | sudo tee /sys/bus/i2c/devices/1-0040/hwmon/hwmon*/shunt_resistor
+```
+
+Writing that value into sysfs is a state change on a machine that may be described declaratively
+elsewhere, and a tool that reconfigures the machine behind that description is how a system stops
+matching what it says it is. It also does not survive a reboot on its own, which is the second reason
+it belongs in whatever describes the machine rather than in a shell.
 
 ## It reads sysfs, not I2C
 

@@ -1,0 +1,193 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/gpio"
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/pmic"
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/sysfs"
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/ups"
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/x1200"
+)
+
+// check is one prerequisite and what to do when it is missing.
+type check struct {
+	name string
+	ok   bool
+	// detail is what was found, whether or not it was what was wanted.
+	detail string
+	// fix is what to do about it, and is only shown when the check failed. Every failing check must
+	// have one: a diagnostic that reports a problem without naming the remedy has moved the work
+	// rather than done it.
+	fix string
+	// fatal marks a check whose failure stops the tool working at all, as against one that costs a
+	// feature. The distinction is what turns a list into a priority.
+	fatal bool
+}
+
+// doctorCommand reports whether the prerequisites are in place.
+//
+// This exists because the failure modes are silent by design. An unreadable GPIO means the supply
+// group is simply absent; an unbound driver means the battery is absent; an uncalibrated shunt means
+// every current figure is wrong by a constant factor with nothing to indicate it. Each of those is
+// the right behaviour for the reporting path — inventing a value would be worse — but it leaves the
+// operator with no way to tell "this is fine" from "this has never worked".
+func doctorCommand(args []string, out, errOut io.Writer, port gpio.Port, run pmic.Runner) error {
+	fs := flag.NewFlagSet("x1200 doctor", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	root := fs.String("root", "/sys", "sysfs root")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	fsys := sysfs.OS(*root)
+	var checks []check
+
+	reading, readErr := ups.Read(fsys)
+
+	// Not fatal, and worth being clear why: this tool reads sysfs, so it needs the drivers bound and
+	// not the device node. /dev/i2c-1 is what i2cdetect and i2cget use, which makes it a diagnostic
+	// convenience rather than a prerequisite — and a check that reports a working system as broken
+	// teaches an operator to ignore the whole report.
+	if _, err := os.Stat("/dev/i2c-1"); err == nil {
+		checks = append(checks, check{name: "i2c device", ok: true, detail: "/dev/i2c-1 present, so i2cdetect works"})
+	} else if readErr == nil && reading.Battery != nil {
+		checks = append(checks, check{name: "i2c device", ok: true,
+			detail: "/dev/i2c-1 absent, but the drivers are bound — this tool does not need it"})
+	} else {
+		checks = append(checks, check{
+			name: "i2c device", detail: "/dev/i2c-1 missing and no driver bound either",
+			fix: "needs BOTH `dtparam=i2c_arm=on` in /boot/firmware/config.txt AND the i2c-dev module.\n" +
+				"        With only the first, a reboot gives a working controller and no device file, which looks\n" +
+				"        exactly like the reboot not having happened.",
+		})
+	}
+
+	if readErr == nil && reading.Battery != nil {
+		checks = append(checks, check{name: "fuel gauge", ok: true,
+			detail: fmt.Sprintf("%s bound, reading %s", reading.Battery.Name, percentOf(reading.Battery))})
+	} else {
+		checks = append(checks, check{
+			name: "fuel gauge", detail: "no battery power_supply found", fatal: true,
+			fix: "I2C has no enumeration, so a driver cannot discover the chip. Assert it:\n" +
+				"        echo max17040 0x36 | sudo tee /sys/bus/i2c/devices/i2c-1/new_device",
+		})
+	}
+
+	if readErr == nil && reading.Power != nil {
+		checks = append(checks, check{name: "power monitor", ok: true,
+			detail: fmt.Sprintf("%s bound", reading.Power.Chip)})
+
+		if reading.Power.ShuntUncalibrated() {
+			checks = append(checks, check{
+				name:   "shunt resistance",
+				detail: "10.000 mOhm — the ina2xx default, provably wrong on this board",
+				fix: "every current, power, mAh and Wh figure is scaled by this, likely ~2x low.\n" +
+					"        run `x1200 calibrate` to fit it against the Pi's own sensors.",
+			})
+		} else if reading.Power.ShuntOhms != nil {
+			checks = append(checks, check{name: "shunt resistance", ok: true,
+				detail: fmt.Sprintf("%.3f mOhm, not the driver default", *reading.Power.ShuntOhms*1000)})
+		}
+	} else {
+		checks = append(checks, check{
+			name: "power monitor", detail: "no hwmon publishing bus voltage, current and power",
+			fix: "assert the chip as above:\n" +
+				"        echo ina219 0x40 | sudo tee /sys/bus/i2c/devices/i2c-1/new_device\n" +
+				"        without it there is no current measurement, so no charge, energy or measured capacity.",
+		})
+	}
+
+	// Mains detection, which is the feature people most expect to work and most often has not been
+	// enabled, because the pin needs configuring before it has a readable level at all.
+	chip := ""
+	if port != nil {
+		if chips, err := port.Chips(); err == nil && len(chips) > 0 {
+			chip = chips[0]
+		}
+	}
+	switch {
+	case chip == "":
+		checks = append(checks, check{
+			name: "gpio", detail: "no gpiochip found",
+			fix: "mains detection needs the GPIO character device. On a Pi this is /dev/gpiochip*; without it, on-mains-or-battery is unavailable.",
+		})
+	default:
+		if onMains, err := x1200.Mains(port, chip); err == nil {
+			state := "on battery"
+			if onMains {
+				state = "on mains"
+			}
+			checks = append(checks, check{name: "mains detection", ok: true,
+				detail: fmt.Sprintf("GPIO%d readable on %s, %s", x1200.PLDLine, chip, state)})
+		} else {
+			checks = append(checks, check{
+				name:   "mains detection",
+				detail: fmt.Sprintf("GPIO%d not readable", x1200.PLDLine),
+				fix: "add `gpio=6=ip,pu` to /boot/firmware/config.txt and reboot. An unconfigured line has no\n" +
+					"        level at all — `pinctrl get 6` shows `--` — so no amount of polling will catch an edge.",
+			})
+		}
+	}
+
+	// Only needed by calibration, so its absence is not a fault on a machine that is not a Pi.
+	if got, err := pmic.Read(run); err == nil {
+		checks = append(checks, check{name: "pi power sensors", ok: true,
+			detail: fmt.Sprintf("%d rails, %.2f W total", got.Rails, got.Watts)})
+	} else {
+		checks = append(checks, check{
+			name: "pi power sensors", detail: "vcgencmd pmic_read_adc unavailable",
+			fix: "only `x1200 calibrate` needs this. It is a Raspberry Pi firmware interface, so it is expected to be missing elsewhere.",
+		})
+	}
+
+	width := 0
+	for _, c := range checks {
+		if n := len(c.name); n > width {
+			width = n
+		}
+	}
+
+	var failed, fatal int
+	for _, c := range checks {
+		mark := "FAIL"
+		if c.ok {
+			mark = " ok "
+		} else {
+			failed++
+			if c.fatal {
+				fatal++
+				mark = "STOP"
+			}
+		}
+		fmt.Fprintf(out, "[%s] %-*s  %s\n", mark, width, c.name, c.detail)
+		if !c.ok && c.fix != "" {
+			fmt.Fprintf(out, "       %s→ %s\n", strings.Repeat(" ", width-5), c.fix)
+		}
+	}
+
+	fmt.Fprintln(out)
+	switch {
+	case fatal > 0:
+		fmt.Fprintf(out, "%d of %d checks failed, %d of them fatal: the tool cannot report anything useful yet.\n", failed, len(checks), fatal)
+		return fmt.Errorf("%d fatal prerequisite(s) missing", fatal)
+	case failed > 0:
+		fmt.Fprintf(out, "%d of %d checks failed. The tool works, but some readings are missing or unscaled.\n", failed, len(checks))
+		return nil
+	default:
+		fmt.Fprintf(out, "All %d checks passed.\n", len(checks))
+		return nil
+	}
+}
+
+// percentOf renders a gauge reading, distinguishing an unreadable gauge from a flat pack.
+func percentOf(b *ups.Battery) string {
+	if b.Percent == nil {
+		return "no percentage"
+	}
+	return fmt.Sprintf("%d%%", *b.Percent)
+}

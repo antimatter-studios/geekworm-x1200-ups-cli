@@ -18,6 +18,7 @@ import (
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/estimate"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/gpio"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/history"
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/pmic"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/service"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/sysfs"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/ups"
@@ -316,11 +317,17 @@ func command(name string, args []string, out, errOut io.Writer) error {
 		return systemdCommand(args, out, errOut)
 	case "record":
 		return recordCommand(args, out, errOut)
+	case "calibrate":
+		return calibrateCommand(args, out, errOut, pmic.Exec, time.Sleep)
+	case "doctor":
+		return doctorCommand(args, out, errOut, gpio.OS{}, pmic.Exec)
 	default:
 		fmt.Fprintf(errOut, "x1200: unknown command %q\n\ncommands:\n"+
 			"  version   what this binary is\n"+
 			"  systemd   print the service and timer units\n"+
-			"  record    take one sample and append it to the archive\n"+
+			"  record    take one sample and append it to the store\n"+
+			"  calibrate fit the shunt resistance against the Pi's own sensors\n"+
+			"  doctor    check the prerequisites are in place\n"+
 			"\nrun `x1200 -h` for flags\n", name)
 		return fmt.Errorf("unknown command %q", name)
 	}
