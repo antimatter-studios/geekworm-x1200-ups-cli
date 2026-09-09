@@ -203,6 +203,11 @@ func supplyRows(s *Supply, c *Charging) []row {
 			source = "mains"
 		}
 		rows = append(rows, row{"source", fmt.Sprintf("%s  (GPIO%d)", source, s.Line)})
+		// Above the caveat, and worded as a warning rather than a footnote: this is the caveat
+		// having actually happened, not a general reservation about the sensor.
+		if s.Suspect != "" {
+			rows = append(rows, row{"SUSPECT", s.Suspect})
+		}
 		// Only shown when on mains: the caveat is that a stuck-high line reads as healthy, so it
 		// qualifies a positive reading and has nothing to say about a negative one.
 		if s.OnMains && s.Caveat != "" {

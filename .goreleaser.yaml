@@ -32,8 +32,17 @@ builds:
     flags:
       - -trimpath
 
+    # The version path is internal/build rather than main: a build carries three facts about its
+    # own provenance and they belong beside the code that interprets them.
+    #
+    # Commit and date are stamped even though Go embeds the revision on its own, because a release
+    # is the one build where the identity must not depend on how it was invoked — `goreleaser` may
+    # build from a detached checkout where the VCS stamping is absent.
     ldflags:
-      - -s -w -X main.version={{ .Version }}
+      - -s -w
+      - -X github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/build.Version={{ .Version }}
+      - -X github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/build.Commit={{ .FullCommit }}
+      - -X github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/build.Date={{ .Date }}
 
     goos:
       - linux
@@ -78,6 +87,8 @@ checksum:
   # rather than trusted.
   name_template: checksums.txt
 
+# Only used by `make snapshot` locally now. CI does not build snapshots: releases come from tags
+# only, so that nothing installable exists that does not correspond to a tag.
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 

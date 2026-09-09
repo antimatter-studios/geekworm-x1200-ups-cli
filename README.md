@@ -147,11 +147,56 @@ make snapshot   # every release artefact, built but not published
 make deploy     # scp to a Pi and install to /usr/local/bin
 ```
 
+## Which build is this
+
+```
+$ x1200 version
+x1200
+  version:  v0.2.0
+  source:   release
+  commit:   2269a16724a91531f7255406ceb0c04f56cd031e
+  built:    2026-09-09T07:08:39Z
+  go:       go1.24.0
+  platform: linux/arm64
+```
+
+`x1200 version -json` for the same thing machine-readably, and `x1200 -version` for one line.
+
+A version string is only useful if it cannot lie, and the question is always the same: is the thing
+running on that machine the thing I think I built? So the two kinds of build take their identity
+from different places.
+
+A **release** is built from a tag by the pipeline, which stamps the tag in. The tag is the identity,
+because that is the name a person asks for.
+
+A **local build** stamps nothing at all. Go embeds the commit and a dirty flag in the binary's own
+build info, so it reports them without any help — and unlike a stamped string, that cannot be stale
+or forgotten:
+
+```
+$ x1200 version
+x1200
+  version:  2269a16724a9-dirty
+  source:   source (uncommitted changes)
+```
+
+The `-dirty` is in the version itself rather than only in the `source` field, because the version is
+what gets pasted into an issue, and a build with uncommitted changes must not masquerade as a commit
+somebody else could check out. `go run` is the one case that reports `unknown`: it does not embed VCS
+information at all.
+
 ## Releases
 
 Pushing a `v*` tag builds and publishes through [GoReleaser](https://goreleaser.com): tarballs and
 Debian packages for linux amd64, arm64 and armv7, plus darwin amd64 and arm64, with a
 `checksums.txt` beside them.
+
+**Only tags produce binaries.** `release.yml` runs on `v*` tags and nothing else; `ci.yml` runs the
+tests on every push and pull request and produces nothing installable. So every artefact that exists
+anywhere corresponds to a tag somebody can name — there is no snapshot to be mistaken for a release,
+and no way to install something that was never tagged. The tests still run continuously, because the
+alternative is discovering a break at the moment of tagging, which is both the worst time to find it
+and the point at which the pressure to ship anyway is highest.
 
 The checksums are the point rather than a formality. Whatever installs this on the Pi should verify
 what it downloaded instead of trusting the transfer, and that only works if every release is built

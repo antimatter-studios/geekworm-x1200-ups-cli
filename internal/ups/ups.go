@@ -77,6 +77,14 @@ type Supply struct {
 	// reads high — and this HAT connects through pogo pins, which is exactly the contact that goes
 	// intermittent. A stuck "on mains" is therefore a possible fault, not proof.
 	Caveat string `json:"caveat,omitempty"`
+	// Suspect is set when the pin claims mains while the pack is measurably draining.
+	//
+	// This is the failure the Caveat warns about, actually caught. The two sources are independent:
+	// the pin is an absence of signal, while a falling percentage is a measurement, and a
+	// measurement beats an absence. A daemon that trusted the pin alone would sit through a power
+	// cut it could not see, so the contradiction is surfaced rather than resolved silently in favour
+	// of the hardware.
+	Suspect string `json:"suspect,omitempty"`
 }
 
 // Charging is whether the board is currently allowed to charge the pack.

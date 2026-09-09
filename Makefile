@@ -1,7 +1,10 @@
 BINARY  := x1200
 MODULE  := github.com/antimatter-studios/geekworm-x1200-ups-cli
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -s -w -X main.version=$(VERSION)
+# Source builds deliberately stamp nothing. Go embeds the commit and the dirty flag in the binary's
+# own build info, so `x1200 version` reports the commit and says "source" without any help — and
+# unlike a stamped string, that cannot be stale or forgotten. Releases are the only builds that
+# stamp a version, and the pipeline does that from the tag.
+LDFLAGS := -s -w
 
 # Where deploy sends the binary. Set it on the command line or in the environment:
 #   make deploy HOST=pi@raspberrypi.local
@@ -33,7 +36,7 @@ arm64:
 # homelab-server stack — this target is for the loop before that is worth doing.
 deploy: arm64
 	scp dist/$(BINARY)-linux-arm64 $(HOST):/tmp/$(BINARY)
-	ssh $(HOST) 'sudo install -m 0755 /tmp/$(BINARY) /usr/local/bin/$(BINARY) && $(BINARY) --version'
+	ssh $(HOST) 'sudo install -m 0755 /tmp/$(BINARY) /usr/local/bin/$(BINARY) && $(BINARY) version'
 
 # Everything a release would produce, without publishing any of it. Same command CI runs.
 snapshot:

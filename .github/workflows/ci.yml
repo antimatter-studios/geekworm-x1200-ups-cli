@@ -1,9 +1,17 @@
+# Tests. Runs on every push and pull request, and produces nothing installable.
+#
+# Split from release.yml deliberately. Releases are built only from tags, so that every artefact
+# that exists anywhere corresponds to a name somebody can ask for — no snapshot builds to be
+# confused for a release, and no way to install something that was never tagged.
+#
+# The tests still run continuously, though, because the alternative is going blind between releases:
+# a break would sit undiscovered until the moment of tagging, which is the worst time to find it and
+# the point at which the pressure to ship anyway is highest.
 name: ci
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
 
 permissions:
@@ -39,52 +47,28 @@ jobs:
       - name: coverage
         run: go tool cover -func=coverage.out
 
-  # Builds every artefact a real release would, on every push, so that a packaging mistake surfaces
-  # when it is cheap to fix rather than at the moment of tagging.
-  snapshot:
-    if: "!startsWith(github.ref, 'refs/tags/v')"
+  # Cross-compilation is checked here rather than at release time. The target is a Raspberry Pi and
+  # the code contains a linux-only GPIO implementation behind build tags, so an arm64 build breaking
+  # is both plausible and invisible to a test run on amd64.
+  cross:
     runs-on: ubuntu-latest
     needs: test
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # goreleaser derives the version from tag history
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
           cache: true
 
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          version: '~> v2'
-          args: release --snapshot --clean --skip=publish
+      - name: build for every target
+        run: |
+          set -eux
+          for target in linux/arm64 linux/arm linux/amd64 darwin/arm64 darwin/amd64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
+              go build -o /dev/null ./...
+          done
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: snapshot
-          path: |
-            dist/*.tar.gz
-            dist/*.deb
-            dist/checksums.txt
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    needs: test
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-          cache: true
-
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          version: '~> v2'
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The GPIO layer is compiled out on darwin, so its tests must still pass there: that is the
+      # stub that returns an error rather than a misleading false.
+      - name: vet the non-linux build
+        run: GOOS=darwin GOARCH=arm64 go vet ./...

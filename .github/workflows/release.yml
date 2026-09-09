@@ -1,0 +1,56 @@
+# Releases. Runs only on a version tag, and is the only thing here that produces binaries.
+#
+# That constraint is the point. Every artefact that exists anywhere corresponds to a tag somebody
+# can name, so "which build is on that machine" always has an answer, and there is no snapshot lying
+# around to be mistaken for a release or installed by accident.
+#
+# It follows that the version stamped into the binary is the tag, and `x1200 version` reports
+# source: release. Anything built any other way reports the commit it came from instead — see
+# internal/build. A binary can therefore always say whether it is a release or somebody's laptop
+# build, which is the question actually being asked when something is wrong in production.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to create the GitHub release and upload assets
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # GoReleaser derives the version and the changelog from tag history, so a shallow clone
+          # would produce a release that cannot see what came before it.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      # Belt and braces over goreleaser's own `before` hook. A tag is the moment when skipping tests
+      # is most tempting and least wise, and a failure here is cheaper than a bad release that a Pi
+      # has already installed.
+      - name: test
+        run: go test -race ./...
+
+      - name: config is valid
+        run: go run github.com/goreleaser/goreleaser/v2@latest check
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Printed into the log so that whoever bumps the Pulumi DebPackage resource can read the
+      # checksum out of the run rather than downloading the asset to compute it themselves.
+      - name: checksums
+        run: cat dist/checksums.txt

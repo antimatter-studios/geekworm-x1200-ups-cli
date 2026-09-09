@@ -5,12 +5,15 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/build"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/estimate"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/gpio"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/history"
@@ -18,9 +21,6 @@ import (
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/ups"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/x1200"
 )
-
-// version is stamped at build time with -ldflags "-X main.version=...".
-var version = "dev"
 
 // options is what the flags parsed to, kept separate from the parsing so that run can be exercised
 // without a process, a clock or a real filesystem.
@@ -52,6 +52,16 @@ const (
 // tested. What is left here is the impure edges — the real filesystem, the real output stream, the
 // real clock, and the exit status.
 func main() {
+	// Subcommands are dispatched before flags so that `x1200 version` works on a machine with no
+	// hardware and no /sys at all — the first question asked of a binary in the wrong place is what
+	// it is, and that answer must never depend on finding a UPS.
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		if err := command(os.Args[1], os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	opts, done, err := parse(os.Args[1:], os.Stderr)
 	if err != nil {
 		os.Exit(2)
@@ -90,7 +100,9 @@ func parse(args []string, errOut io.Writer) (opts options, done bool, err error)
 		return opts, false, err
 	}
 	if *showVersion {
-		fmt.Fprintln(errOut, version)
+		// To stdout, not stderr: a version is output, not a diagnostic, and piping it into
+		// something is a reasonable thing to want.
+		fmt.Fprintln(os.Stdout, build.Current().String())
 		return opts, true, nil
 	}
 	return opts, false, nil
@@ -133,6 +145,7 @@ func once(fs sysfs.FS, now func() time.Time, store history.Store, port gpio.Port
 		supply(reading, port, opts.chip)
 	}
 	reading.Estimate = track(reading, now, store, opts.window)
+	corroborate(reading)
 	if opts.json {
 		return ups.JSON(reading)
 	}
@@ -206,4 +219,68 @@ func supply(reading *ups.Reading, port gpio.Port, chip string) {
 	if enabled, err := x1200.Charging(port, chip); err == nil {
 		reading.Charging = &ups.Charging{Enabled: enabled, Line: x1200.ChargeLine}
 	}
+}
+
+// command dispatches a subcommand.
+//
+// Kept deliberately small. The tool's job is to print a reading, and subcommands are for the things
+// that are not that: identifying the binary, and later setting the machine up and checking it over.
+// An unknown one lists what exists rather than only complaining, because a person who guessed wrong
+// wants the answer more than the correction.
+func command(name string, args []string, out, errOut io.Writer) error {
+	switch name {
+	case "version":
+		return versionCommand(args, out, errOut)
+	default:
+		fmt.Fprintf(errOut, "x1200: unknown command %q\n\ncommands:\n  version   what this binary is\n\nrun `x1200 -h` for flags\n", name)
+		return fmt.Errorf("unknown command %q", name)
+	}
+}
+
+// versionCommand prints what this binary is, in full or as JSON.
+func versionCommand(args []string, out, errOut io.Writer) error {
+	fs := flag.NewFlagSet("x1200 version", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	asJSON := fs.Bool("json", false, "emit JSON instead of text")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	info := build.Current()
+	if *asJSON {
+		encoded, err := json.MarshalIndent(info, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(out, string(encoded))
+		return err
+	}
+	_, err := io.WriteString(out, info.Details())
+	return err
+}
+
+// corroborate cross-checks the mains pin against the pack.
+//
+// The mains line is read with a pull-up, so "mains present" is the level a floating pin produces: a
+// HAT not seated, a pogo-pin contact gone intermittent, or the board removed entirely all read as
+// healthy mains. The detector's failure mode is to report that nothing is wrong.
+//
+// A falling percentage is the opposite kind of evidence. It is a measurement rather than an absence,
+// it comes from a different chip on a different bus, and it was the only thing that told the truth
+// during an observed outage where the pin said nothing at all. So when the two disagree — pin says
+// mains, gauge says the charge is going down — the disagreement is reported rather than resolved.
+//
+// Deliberately not resolved in favour of either. Overriding the pin would be a guess about which
+// sensor is broken, and the honest output is that they contradict each other and one of them needs
+// looking at. Anything automatic built on this must treat a suspect reading as "assume the worst".
+func corroborate(reading *ups.Reading) {
+	if reading.Supply == nil || !reading.Supply.OnMains {
+		return
+	}
+	if reading.Estimate == nil || reading.Estimate.State != estimate.Discharging {
+		return
+	}
+	reading.Supply.Suspect = fmt.Sprintf(
+		"GPIO%d reads mains but the pack is draining; a floating pin also reads mains, so check the HAT is seated",
+		reading.Supply.Line)
 }
