@@ -1,0 +1,19 @@
+[Unit]
+Description=Sample the X1200 UPS every 5m0s
+Documentation=https://github.com/antimatter-studios/geekworm-x1200-ups-cli
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5m0s
+# Catch up with one sample after downtime rather than skipping it. The gap itself is data: the
+# integrator refuses to integrate across it, so a missing period is visible as reduced coverage
+# rather than being quietly averaged over.
+Persistent=true
+# Fixed rather than randomised. A jittered timer would put samples at unpredictable spacing, and the
+# integrator's gap tolerance is set from this interval — spacing that wanders past the tolerance
+# would drop intervals for no reason anybody could see.
+AccuracySec=10s
+Unit=x1200.service
+
+[Install]
+WantedBy=timers.target

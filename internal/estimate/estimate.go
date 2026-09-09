@@ -65,6 +65,14 @@ const (
 
 	// MinSamples is the fewest settled samples worth taking a median of.
 	MinSamples = 4
+
+	// MaxRunGap is the longest silence a single run may contain.
+	//
+	// Six minutes accommodates the five-minute sampling timer with room for a late fire, and refuses
+	// anything longer — a reboot, a suspended machine, or simply nobody running the tool. Without
+	// this the store could not safely outlive a reboot, because a sample from before a power cut and
+	// one from after it would be read as a continuous trend.
+	MaxRunGap = 6 * time.Minute
 )
 
 // Estimate is the answer, including enough of its own provenance to be argued with.
@@ -108,6 +116,14 @@ func Run(samples []history.Sample) []history.Sample {
 	start := 0
 	for i := len(samples) - 1; i > 0; i-- {
 		prev, cur := samples[i-1], samples[i]
+		// A long gap ends the run regardless of direction. The machine may have been off, or nobody
+		// ran the tool; either way the samples on the far side describe a different situation, and
+		// averaging across the gap would produce a trend that never happened. This is what makes it
+		// safe for the store to survive a reboot.
+		if cur.At.Sub(prev.At) > MaxRunGap {
+			start = i
+			break
+		}
 		// A step the other way ends the run. Equal percentages continue it, because a plateau is
 		// normal on a gauge that reports whole numbers.
 		if falling && cur.Percent > prev.Percent {

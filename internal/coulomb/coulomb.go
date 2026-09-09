@@ -66,6 +66,24 @@ type Charge struct {
 // rather than stepping, so averaging each interval's endpoints is both more accurate and no more
 // code than taking one end and ignoring the other.
 func Integrate(samples []history.Sample) Charge {
+	return IntegrateWithin(samples, MaxGap)
+}
+
+// IntegrateWithin is Integrate with an explicit gap tolerance.
+//
+// The tolerance has to be settable because it is not a property of the data, it is a property of how
+// the data was collected. A five-minute systemd timer produces five-minute gaps that are perfectly
+// trustworthy — the sampling is regular and the load between samples resembles the load at their
+// ends. The same five-minute gap in an ad-hoc series means nobody ran the tool, and integrating
+// across it invents charge.
+//
+// Getting this wrong is silent, which is why it is a parameter rather than a constant somebody has
+// to remember to change: a tolerance below the timer interval refuses every interval, and the result
+// is not an error but a coverage of zero and no charge figures at all.
+func IntegrateWithin(samples []history.Sample, maxGap time.Duration) Charge {
+	if maxGap <= 0 {
+		maxGap = MaxGap
+	}
 	var c Charge
 	if len(samples) < 2 {
 		return c
@@ -80,7 +98,7 @@ func Integrate(samples []history.Sample) Charge {
 			// Duplicate or out-of-order timestamps contribute nothing rather than a negative.
 			continue
 		}
-		if gap > MaxGap {
+		if gap > maxGap {
 			c.Skipped++
 			continue
 		}

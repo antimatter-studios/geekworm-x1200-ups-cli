@@ -10,9 +10,9 @@ LDFLAGS := -s -w
 #   make deploy HOST=pi@raspberrypi.local
 HOST ?= pi@raspberrypi.local
 
-.PHONY: all test cover vet fmt build arm64 snapshot check-release deploy clean
+.PHONY: all test cover vet fmt build arm64 units snapshot check-release deploy clean
 
-all: vet test build
+all: units vet test build
 
 test:
 	go test ./...
@@ -39,7 +39,12 @@ deploy: arm64
 	ssh $(HOST) 'sudo install -m 0755 /tmp/$(BINARY) /usr/local/bin/$(BINARY) && $(BINARY) version'
 
 # Everything a release would produce, without publishing any of it. Same command CI runs.
-snapshot:
+# Regenerates the packaged unit files from internal/service. A test fails if they are stale, so this
+# is the fix rather than an optional tidy-up.
+units:
+	go run ./cmd/gen-units -out packaging
+
+snapshot: units
 	goreleaser release --snapshot --clean --skip=publish
 
 check-release:

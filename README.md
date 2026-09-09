@@ -113,19 +113,23 @@ gauge that reports whole numbers.
 |---|---|---|
 | `--json` | off | machine-readable output |
 | `--watch` | `0` | repeat at an interval, e.g. `--watch 2s` |
-| `--history` | `/tmp/x1200-history` | sample store for the estimate; empty disables it |
-| `--window` | `2h` | how much history to keep and estimate from |
+| `--store` | `/var/lib/x1200/samples` | sample store; empty disables recording and everything derived from it |
+| `--window` | `2h` | how much recent history the rate estimate looks at |
+| `--max-gap` | `2m` | longest gap between samples that may be integrated across |
+| `--capacity-mah` | `0` | declared pack capacity, for a runtime estimate; 0 omits it |
 | `--gpio` | on | read mains and charging state from GPIO |
 | `--chip` | auto | which gpiochip; empty picks the header controller |
 | `--root` | `/sys` | sysfs root, for running against captured files |
 | `--version` | | one-line identity; `x1200 version` for detail |
+
+Subcommands: `version`, `systemd` (print the units), `record` (take one sample and append it).
 
 `--root` is what makes this testable without hardware: point it at a directory of captured sysfs
 files and the whole program runs on any machine.
 
 ## How it is put together
 
-Seven packages, each with one job, and the split follows a single rule: anything impure is injected
+Nine packages, each with one job, and the split follows a single rule: anything impure is injected
 so that the logic can be tested against a map literal on a laptop with no Raspberry Pi attached.
 
 | package | responsibility |
@@ -136,6 +140,8 @@ so that the logic can be tested against a map literal on a laptop with no Raspbe
 | `history` | persists samples so a rate can be measured between invocations |
 | `gpio` | the Linux GPIO character device, by ioctl, with no external dependency |
 | `x1200` | the pin numbers and polarities specific to this board |
+| `coulomb` | integrates measured current into charge actually delivered |
+| `service` | the systemd units, and the single source of truth for them |
 | `build` | what this binary is and where it came from |
 
 `gpio` is the one place with `unsafe`, confined to a single `ioctl` function. Its struct layouts live
@@ -148,6 +154,132 @@ field was wrong.
 `x1200` is where the genericity deliberately stops. Everything else finds devices by shape — a hwmon
 publishing a bus voltage, a current and a power is a power monitor whatever chip is underneath — but
 a pin number and a polarity are facts about one board and cannot be inferred from anything.
+
+## Installing
+
+Three ways in, and all three end up with identical unit files — see below for why that took effort.
+
+**Debian package** (Raspberry Pi OS, and the one to prefer):
+
+```sh
+apt install ./x1200_0.2.0_linux_arm64.deb
+```
+
+Installs the binary to `/usr/bin/x1200` and the systemd units to `/lib/systemd/system`. It does
+**not** enable the timer: installing a package should not start a machine writing to its own SD card
+on a schedule nobody asked for. `dpkg` records what it placed, so anything auditing the machine
+later can see where the files came from.
+
+**Tarball**, which carries the units in a `systemd/` directory:
+
+```sh
+tar xzf x1200_0.2.0_linux_arm64.tar.gz
+install -m 0755 x1200 /usr/local/bin/
+cp systemd/x1200.* /etc/systemd/system/
+```
+
+**Binary alone**, downloaded on its own. Nothing is lost — the binary can emit the units itself:
+
+```sh
+x1200 systemd --binary /usr/local/bin/x1200 > /dev/null   # see them
+x1200 systemd --only service > /etc/systemd/system/x1200.service
+x1200 systemd --only timer   > /etc/systemd/system/x1200.timer
+```
+
+Then, however you installed:
+
+```sh
+systemctl daemon-reload
+systemctl enable --now x1200.timer
+```
+
+Verify what you got with `x1200 version` — a release build reports `source: release` and its tag,
+anything else reports the commit it was built from.
+
+### Why the units live in Go
+
+The program is no longer only a binary, and that creates a way to get quietly out of step. A package
+can install a timer and a state directory; a downloaded binary installs neither. If the packaged
+unit and the documented unit drift apart, the tool samples differently depending on how it was
+installed — and that surfaces as missing data weeks later, with nothing to point at.
+
+So the unit text lives in `internal/service`, `x1200 systemd` prints it, and `make units` writes the
+copies that the `.deb` and the tarball ship. A test compares those copies against the code and fails
+if they differ. Without that test it would just be two copies with extra steps.
+
+Nothing in the tool installs or enables anything. Writing to `/etc` and running `systemctl` are
+decisions about what the machine does, and on a machine described declaratively elsewhere, a tool
+that reaches around that description is how a system stops matching what it says it is. The binary
+produces text; something else decides what to do with it.
+
+## The recording service
+
+A single reading cannot say how long the pack will last, how much charge has actually moved, or what
+the cells really hold. All three need the numbers watched over time, so a timer samples every five
+minutes and appends to one file:
+
+```
+/var/lib/x1200/samples
+```
+
+`/var/lib` because that is where the Filesystem Hierarchy Standard puts state kept across reboots,
+which is what this is — and it is worth more the longer it runs, since real capacity is only
+measurable across a genuine discharge and those are rare.
+
+One file, not two. There were briefly two — a short volatile window for the rate and a long
+persistent archive — and the split did not survive the question "why". The estimator wants the
+recent tail and the integrator wants all of it; that is two views of one file.
+
+**It appends rather than rewriting, and that is not a detail.** Rewriting the whole store on every
+sample costs its full size each time: at a few thousand samples that is tens of kilobytes, and 288
+samples a day is around 17 MB daily, 6 GB a year of write amplification. This Pi has already
+destroyed one SD card exactly that way. An append costs about 45 bytes — some 300× less — and the
+full rewrite happens only when the file passes 1 MB, at which point it is pruned in one pass.
+
+### The gap tolerance, which will bite you if you change the interval
+
+The integrator refuses to integrate across a gap longer than `--max-gap`, because this tool also runs
+on demand: one reading half an hour after another would otherwise contribute charge nobody measured.
+The unit therefore passes `--max-gap` matching its own timer interval.
+
+**Those two must agree.** A tolerance below the sampling interval refuses *every* interval, and the
+result is not an error — it is a coverage of zero and no charge figures at all, silently. A test
+asserts the unit and the timer stay in step, and the same reasoning ends a run in the rate estimator:
+a gap longer than six minutes means the machine may have been off, so samples either side of it are
+not read as one trend. That is what makes it safe for the store to outlive a reboot.
+
+Coverage is always reported next to elapsed time for the same reason:
+
+```
+measured over: 20m of 20m elapsed
+```
+
+Equal values mean the sampler ran throughout. A covered time well below the span means the totals
+describe only the minutes something was watching, not the period they appear to cover.
+
+### What it gets you
+
+```
+delivered
+  charge:           173.5 mAh
+  energy:           0.88 Wh
+  mean:             0.520 A
+  measured over:    20m of 20m elapsed
+  runtime:          11h32m at this rate  (assumes 6000 mAh declared, NOT measured)
+  implied capacity: 2600 mAh, from the discharge trend at the measured current
+                    —  the declared 6000 mAh is 2.3x higher
+```
+
+`delivered` is kept apart from `battery` deliberately: the percentage is a *model* and this is a
+*measurement*, and the gauge has been observed swinging eleven points in sixty seconds with no
+charge movement behind it.
+
+That last line is two independent measurements checking each other. The gauge says how fast the
+percentage falls; the INA219 says how much current flows. If the pack held its declared capacity
+those would agree. Where they diverge the declared figure is the suspect one — 18650 chemistry caps
+around 3500 mAh per cell, so cells sold as 5000 mAh are overstated, and this says by how much
+instead of leaving it a suspicion. A capacity is never inferred: pass `--capacity-mah` or the runtime
+line is simply absent.
 
 ## It reads sysfs, not I2C
 

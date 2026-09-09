@@ -65,8 +65,16 @@ archives:
       - tar.gz
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}
+    # The tarball carries the units too. A tarball user gets no package scripts, so without these
+    # they would have to copy the unit text out of the README — which is how a documented copy comes
+    # to differ from the real one. `x1200 systemd` prints the same content, so there are two ways to
+    # get it right and none to get a stale version.
     files:
       - README.md
+      - src: packaging/x1200.service
+        dst: systemd/x1200.service
+      - src: packaging/x1200.timer
+        dst: systemd/x1200.timer
 
 # A Debian package as well as a tarball, because Raspberry Pi OS is Debian and `apt install ./x1200.deb`
 # leaves a record in dpkg that a copied binary does not. Anything auditing the machine later can then
@@ -81,6 +89,16 @@ nfpms:
     homepage: https://github.com/antimatter-studios/geekworm-x1200-ups-cli
     section: utils
     bindir: /usr/bin
+
+    contents:
+      - src: packaging/x1200.service
+        dst: /lib/systemd/system/x1200.service
+      - src: packaging/x1200.timer
+        dst: /lib/systemd/system/x1200.timer
+
+    scripts:
+      postinstall: packaging/postinstall.sh
+      preremove: packaging/preremove.sh
 
 checksum:
   # The file a Pulumi resource verifies a download against, so that installing this is checked

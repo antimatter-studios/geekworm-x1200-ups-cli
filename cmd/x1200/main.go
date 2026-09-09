@@ -18,6 +18,7 @@ import (
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/estimate"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/gpio"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/history"
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/service"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/sysfs"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/ups"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/x1200"
@@ -34,20 +35,29 @@ type options struct {
 	gpio     bool
 	chip     string
 	capacity float64
+	maxGap   time.Duration
+	archive  string
 }
 
 // Defaults for the sample store.
 //
-// The path is under /tmp because that is a tmpfs on every distribution this runs on, and both
-// properties of a tmpfs are wanted. Writes never reach the SD card, which matters on a Pi that has
-// already lost one card to write amplification; and the file disappears on reboot, which is correct
-// rather than unfortunate — a discharge rate measured before a power cycle describes a machine in a
-// different state, and carrying it across a reboot would produce a confident answer from samples on
-// the wrong side of the event.
+// One store, under /var/lib, which is where the Filesystem Hierarchy Standard puts state a program
+// keeps across reboots. There were briefly two — a volatile rate window and a persistent archive —
+// and the split did not survive contact with the question "why". The estimator wants the recent
+// tail and the integrator wants everything, which is two views of one file, not two files.
+//
+// Appending is what makes /var/lib affordable. A whole-file rewrite costs tens of kilobytes per
+// sample and this Pi has already destroyed one SD card that way; an append costs about forty-five
+// bytes, and the rewrite happens only when the file passes maxArchiveBytes.
 const (
-	defaultHistory = "/tmp/x1200-history"
-	defaultWindow  = 2 * time.Hour
-	maxSamples     = 2000
+	defaultStore = "/var/lib/x1200/samples"
+	// defaultWindow is how much history the rate estimate looks at, not how much is kept.
+	defaultWindow = 2 * time.Hour
+	// keepWindow is how much is retained when the file is finally pruned. Long, because capacity is
+	// only measurable across a real discharge and those are rare.
+	keepWindow      = 30 * 24 * time.Hour
+	maxSamples      = 20000
+	maxArchiveBytes = 1 << 20
 )
 
 // main is wiring and nothing else: every decision it makes is in parse or run, both of which are
@@ -73,7 +83,7 @@ func main() {
 	}
 	store := history.Store{}
 	if opts.history != "" {
-		store = history.File(opts.history)
+		store = history.Archive(opts.history).Store
 	}
 	if err := run(sysfs.OS(opts.root), os.Stdout, time.Sleep, time.Now, store, gpio.OS{}, opts); err != nil {
 		fmt.Fprintln(os.Stderr, "x1200:", err)
@@ -93,7 +103,7 @@ func parse(args []string, errOut io.Writer) (opts options, done bool, err error)
 	fs.StringVar(&opts.root, "root", "/sys", "sysfs root, for testing against captured files")
 	fs.BoolVar(&opts.json, "json", false, "emit JSON instead of text")
 	fs.DurationVar(&opts.watch, "watch", 0, "repeat at this interval, e.g. 2s; 0 reads once")
-	fs.StringVar(&opts.history, "history", defaultHistory, "sample store used to estimate time remaining; empty disables it")
+	fs.StringVar(&opts.history, "store", defaultStore, "sample store; empty disables recording and the figures derived from it")
 	fs.DurationVar(&opts.window, "window", defaultWindow, "how much history to keep and estimate from")
 	fs.BoolVar(&opts.gpio, "gpio", true, "read mains presence and charging state from GPIO")
 	fs.StringVar(&opts.chip, "chip", "", "gpiochip to use; empty picks the header controller")
@@ -101,6 +111,9 @@ func parse(args []string, errOut io.Writer) (opts options, done bool, err error)
 	// wrong — 18650 chemistry caps around 3500 mAh a cell, and anything sold as 5000+ is commonly
 	// overstated two- or threefold — so a runtime derived from it says so wherever it is reported.
 	fs.Float64Var(&opts.capacity, "capacity-mah", 0, "declared pack capacity, for a runtime estimate; 0 omits it")
+	// Must be at least the sampling interval or every interval is refused and the charge figures
+	// silently vanish. The systemd unit passes its own timer interval for exactly that reason.
+	fs.DurationVar(&opts.maxGap, "max-gap", coulomb.MaxGap, "longest gap between samples that may be integrated across")
 
 	if err := fs.Parse(args); err != nil {
 		return opts, false, err
@@ -151,8 +164,11 @@ func once(fs sysfs.FS, now func() time.Time, store history.Store, port gpio.Port
 		supply(reading, port, opts.chip)
 	}
 	samples := track(reading, now, store, opts.window)
-	reading.Estimate = estimateFrom(reading, samples)
-	reading.Delivered = deliveredFrom(samples, opts.capacity)
+	// Two views of one store: the rate estimate wants only the recent tail, because an hour-old
+	// sample describes a load that may no longer exist. The integrator below wants everything, since
+	// charge delivered over a long period is the whole point of keeping a long period.
+	reading.Estimate = estimateFrom(reading, history.Recent(samples, now(), window(opts)))
+	reading.Delivered = deliveredFrom(samples, opts.capacity, opts.maxGap)
 	implyCapacity(reading)
 	corroborate(reading)
 	if opts.json {
@@ -194,11 +210,19 @@ func track(reading *ups.Reading, now func() time.Time, store history.Store, wind
 		}
 	}
 
-	samples, err := history.Append(store, sample, window, maxSamples)
+	samples, err := history.Append(store, sample, keepWindow, maxSamples)
 	if err != nil {
 		return nil
 	}
 	return samples
+}
+
+// window returns the rate window, guarding a zero the same way track does.
+func window(opts options) time.Duration {
+	if opts.window <= 0 {
+		return defaultWindow
+	}
+	return opts.window
 }
 
 // estimateFrom derives the percentage-based estimate.
@@ -219,11 +243,11 @@ func estimateFrom(reading *ups.Reading, samples []history.Sample) *estimate.Esti
 // Absent rather than zero when there is too little to say. A charge total of 0.0 mAh reads as "no
 // current flowed", which is a claim about the hardware; the absence of the group reads as "not
 // enough measurement yet", which is a claim about the observation. Only the second is true early on.
-func deliveredFrom(samples []history.Sample, capacityMAh float64) *ups.Delivered {
+func deliveredFrom(samples []history.Sample, capacityMAh float64, maxGap time.Duration) *ups.Delivered {
 	if len(samples) < 2 {
 		return nil
 	}
-	charge := coulomb.Integrate(samples)
+	charge := coulomb.IntegrateWithin(samples, maxGap)
 	note, usable := coulomb.Confidence(charge)
 	if !usable {
 		return nil
@@ -288,8 +312,16 @@ func command(name string, args []string, out, errOut io.Writer) error {
 	switch name {
 	case "version":
 		return versionCommand(args, out, errOut)
+	case "systemd":
+		return systemdCommand(args, out, errOut)
+	case "record":
+		return recordCommand(args, out, errOut)
 	default:
-		fmt.Fprintf(errOut, "x1200: unknown command %q\n\ncommands:\n  version   what this binary is\n\nrun `x1200 -h` for flags\n", name)
+		fmt.Fprintf(errOut, "x1200: unknown command %q\n\ncommands:\n"+
+			"  version   what this binary is\n"+
+			"  systemd   print the service and timer units\n"+
+			"  record    take one sample and append it to the archive\n"+
+			"\nrun `x1200 -h` for flags\n", name)
 		return fmt.Errorf("unknown command %q", name)
 	}
 }
@@ -373,4 +405,101 @@ func implyCapacity(reading *ups.Reading) {
 	remainingMAh := d.MeanCurrentA * 1000 * e.TimeToEmpty.Hours()
 	full := remainingMAh / (percent / 100)
 	d.ImpliedCapacityMAh = &full
+}
+
+// systemdCommand prints the unit files.
+//
+// Printed rather than installed. Writing to /etc and enabling a timer are decisions about what the
+// machine does, and this machine is described by Pulumi — a tool that configures it directly is how
+// a system stops matching its own description. So this emits text and something else decides.
+//
+// It exists because the program is no longer only a binary. The Debian package installs these units;
+// a tarball download installs nothing but the binary, and this is how that user gets the same files
+// rather than a worse copy from the README.
+func systemdCommand(args []string, out, errOut io.Writer) error {
+	fs := flag.NewFlagSet("x1200 systemd", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	binary := fs.String("binary", service.DefaultBinary, "path to the installed binary, used in ExecStart")
+	only := fs.String("only", "", "print just one unit: service or timer")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	files := service.Files(*binary)
+	switch *only {
+	case "service":
+		_, err := io.WriteString(out, files["x1200.service"])
+		return err
+	case "timer":
+		_, err := io.WriteString(out, files["x1200.timer"])
+		return err
+	case "":
+	default:
+		fmt.Fprintf(errOut, "x1200: --only takes service or timer, not %q\n", *only)
+		return fmt.Errorf("bad --only %q", *only)
+	}
+
+	// Both, with filename headers, so the output can be read by a person and split by a script.
+	for _, name := range service.Names() {
+		fmt.Fprintf(out, "# ==> %s <==\n%s\n", name, files[name])
+	}
+	_, err := io.WriteString(out, service.Instructions())
+	return err
+}
+
+// recordCommand takes one sample and appends it to the archive.
+//
+// Separate from the default read for one reason: it appends rather than rewriting. The rate window
+// under /tmp is small and rewritten whole, which is fine in a tmpfs. The archive lives on the SD
+// card, and rewriting a 60 kB file every five minutes is 17 MB a day of write amplification on a
+// machine that has already destroyed one card. Appending a line costs about 45 bytes.
+func recordCommand(args []string, out, errOut io.Writer) error {
+	fs := flag.NewFlagSet("x1200 record", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	root := fs.String("root", "/sys", "sysfs root")
+	archive := fs.String("archive", defaultStore, "file to append the sample to")
+	window := fs.Duration("window", keepWindow, "how much history to keep when the store is pruned")
+	maxBytes := fs.Int64("max-bytes", maxArchiveBytes, "rewrite and prune the store once it exceeds this size")
+	quiet := fs.Bool("quiet", false, "print nothing on success, for a systemd timer")
+	// Accepted and ignored: the unit passes it so that one ExecStart line serves both this and the
+	// reporting path, and rejecting it would make the unit fail for a flag that does no harm here.
+	_ = fs.Duration("max-gap", coulomb.MaxGap, "ignored by record; accepted so the unit can pass one flag set")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	reading, err := ups.Read(sysfs.OS(*root))
+	if err != nil {
+		return err
+	}
+	if reading.Battery == nil || reading.Battery.Percent == nil {
+		return fmt.Errorf("no battery percentage to record")
+	}
+
+	sample := history.Sample{At: time.Now(), Percent: *reading.Battery.Percent}
+	if reading.Battery.VoltageV != nil {
+		sample.VoltageV = *reading.Battery.VoltageV
+	}
+	if reading.Power != nil {
+		if reading.Power.CurrentA != nil {
+			sample.CurrentA = *reading.Power.CurrentA
+		}
+		if reading.Power.WattsW != nil {
+			sample.WattsW = *reading.Power.WattsW
+		}
+	}
+
+	rewrote, err := history.Record(history.Archive(*archive), sample, *window, maxSamples, *maxBytes)
+	if err != nil {
+		return err
+	}
+	if *quiet {
+		return nil
+	}
+	if rewrote {
+		fmt.Fprintf(out, "recorded %d%% %.3fV %.3fA (archive pruned)\n", sample.Percent, sample.VoltageV, sample.CurrentA)
+		return nil
+	}
+	fmt.Fprintf(out, "recorded %d%% %.3fV %.3fA\n", sample.Percent, sample.VoltageV, sample.CurrentA)
+	return nil
 }

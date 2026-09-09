@@ -1,0 +1,35 @@
+[Unit]
+Description=Record X1200 UPS battery and power state
+Documentation=https://github.com/antimatter-studios/geekworm-x1200-ups-cli
+# The sampler needs the I2C drivers bound and the GPIO line configured. Neither is a systemd unit,
+# so this cannot be expressed as a dependency — it is why the unit tolerates failure rather than
+# entering a failed state. A sample missed because the bus is not up yet is not an error worth
+# waking anybody for; a sample missed for that reason forever is, and that is what
+# 'x1200 doctor' is for.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/x1200 record --archive /var/lib/x1200/samples --max-gap 5m0s
+
+# Reads sysfs and one GPIO line, writes one file under /var/lib/x1200. Nothing else is needed, so nothing else
+# is permitted: a sampler that can only do its job is a sampler that cannot be turned into anything
+# more interesting by a bug.
+User=root
+StateDirectory=x1200
+StateDirectoryMode=0755
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# A reading that fails is not a reason to mark the unit broken. The bus may not be up, the HAT may
+# be unseated, the pin may not be configured — all real conditions that the next sample may not
+# share, and none improved by systemd remembering the failure.
+SuccessExitStatus=1
