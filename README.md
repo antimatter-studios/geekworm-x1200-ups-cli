@@ -359,6 +359,38 @@ answer immune to any fixed offset — the HAT's own quiescent draw, for instance
 absorbs into the result. Both are printed because their *disagreement* is itself the evidence that
 such an offset exists.
 
+### Never fit to `in0_input`
+
+The first real calibration on hardware refused to produce a figure, and it was right to — but for an
+artefact rather than a genuine disagreement. hwmon publishes `in0_input`, the shunt drop, in **whole
+millivolts**, and on this board the entire signal is only a few millivolts wide. Measured against a
+load that doubled:
+
+```
+in0=3 mV   curr1=266 mA   -> real drop 2.66 mV
+in0=4 mV   curr1=395 mA   -> real drop 3.95 mV
+in0=3 mV   curr1=267 mA   -> real drop 2.67 mV
+```
+
+The rounding step is around 37% of the signal. A slope fitted to that is fitted to rounding error;
+30 samples across 0.548 A of load gave a spread of 110% and an implausible result.
+
+The current register carries the same measurement at 10 µV per LSB — a hundredfold better — because
+the driver computes it before anything is rounded. Multiplying it back by the resistance the driver
+divided by recovers the true drop:
+
+```
+drop = curr1_input × shunt_resistor
+```
+
+**And the driver's assumed resistance cancels exactly.** It computed current as `drop ÷ assumed`, so
+multiplying by `assumed` returns `drop` whatever the assumption was — which is what makes this usable
+for calibration, where that assumption is precisely the unknown. Verified against the raw register
+read by hand before the drivers claimed the address: 266 mA × 0.01 Ω = 2.66 mV.
+
+`in0_input` is still displayed, because it is what the kernel publishes. Nothing quantitative is
+built on it.
+
 **The spread is the confidence signal.** Two instruments that agree at every load level produce a
 tight spread; one that disagrees produces a wide one. Above 25% the tool says to treat the figure as
 indicative only, and if the drop does not grow with load at all it refuses to offer a value, because

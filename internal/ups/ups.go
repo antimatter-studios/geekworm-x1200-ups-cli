@@ -128,6 +128,35 @@ type Delivered struct {
 // linearly with it, so a reading taken at the default is roughly half what it should be.
 const DriverDefaultShuntOhms = 0.01
 
+// PreciseShuntMV returns the shunt drop at the instrument's real resolution, in millivolts.
+//
+// The obvious source, in0_input, is quantised to whole millivolts by hwmon, and on this board the
+// entire signal is only a few millivolts wide. Measured against a load that doubled, in0 moved
+// 3, 3, 4, 5 while the current moved 266 -> 395 mA: the rounding step is around 37% of the signal,
+// so a slope fitted to it is fitted to rounding error. That is what made the first calibration
+// attempt refuse to produce a figure — correctly, but for an artefact rather than a real
+// disagreement between the instruments.
+//
+// The current register carries the same measurement at 10 uV per LSB, a hundredfold better, because
+// the driver computes it from the raw register before anything is rounded. Multiplying it back by
+// the resistance the driver divided by recovers the true drop:
+//
+//	drop = curr1_input * shunt_resistor
+//
+// The driver's assumed resistance cancels exactly. It computed current as drop/assumed, so
+// multiplying by assumed returns drop whatever the assumption was — which is what makes this usable
+// for calibration, where the assumption is precisely the thing not yet known. Verified against the
+// raw register read by hand before the drivers claimed the address: 266 mA x 0.01 ohm = 2.66 mV.
+//
+// in0_input is still what gets displayed, because it is what the kernel publishes. Nothing
+// quantitative is built on it.
+func (p *Power) PreciseShuntMV() (float64, bool) {
+	if p == nil || p.CurrentA == nil || p.ShuntOhms == nil || *p.ShuntOhms <= 0 {
+		return 0, false
+	}
+	return *p.CurrentA * *p.ShuntOhms * 1000, true
+}
+
 // ShuntUncalibrated reports whether the shunt resistance is still the driver's guess.
 func (p *Power) ShuntUncalibrated() bool {
 	return p != nil && p.ShuntOhms != nil && *p.ShuntOhms == DriverDefaultShuntOhms

@@ -184,3 +184,60 @@ func TestReadWithNothingBound(t *testing.T) {
 		t.Errorf("err = %v; want ErrNoDevices", err)
 	}
 }
+
+// The bug that made the first real calibration refuse to produce a figure. in0_input is quantised
+// to whole millivolts and the whole signal is only a few millivolts wide, so a slope fitted to it is
+// fitted to rounding error.
+func TestPreciseShuntMVRecoversResolutionFromTheCurrentRegister(t *testing.T) {
+	amps, ohms := 0.266, 0.01
+	p := &Power{CurrentA: &amps, ShuntOhms: &ohms}
+
+	got, ok := p.PreciseShuntMV()
+	if !ok {
+		t.Fatal("no precise drop from a complete reading")
+	}
+	// Verified against the raw register read by hand: 266 mA x 0.01 ohm = 2.66 mV, where in0_input
+	// would have reported 3.
+	if diff := got - 2.66; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("drop = %.4f mV, want 2.66", got)
+	}
+}
+
+// The driver's assumed resistance must cancel exactly, because during calibration that assumption is
+// the very thing not yet known. It computed current as drop/assumed, so multiplying back by assumed
+// returns the same drop whatever it assumed.
+func TestPreciseShuntMVIsIndependentOfTheAssumedResistance(t *testing.T) {
+	// One real drop of 2.66 mV, as two drivers with different assumptions would report it.
+	realDropMV := 2.66
+	var last float64
+	for i, ohms := range []float64{0.01, 0.005, 0.002} {
+		amps := (realDropMV / 1000) / ohms
+		o := ohms
+		got, ok := (&Power{CurrentA: &amps, ShuntOhms: &o}).PreciseShuntMV()
+		if !ok {
+			t.Fatal("no precise drop")
+		}
+		if i > 0 && (got-last > 1e-9 || got-last < -1e-9) {
+			t.Errorf("assumption %v gave %.6f mV, previous gave %.6f; it must cancel", ohms, got, last)
+		}
+		last = got
+	}
+	if diff := last - realDropMV; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("recovered %.6f mV, want %.6f", last, realDropMV)
+	}
+}
+
+func TestPreciseShuntMVNeedsBothInputs(t *testing.T) {
+	amps, ohms, zero := 0.266, 0.01, 0.0
+	for _, p := range []*Power{
+		nil,
+		{},
+		{CurrentA: &amps},
+		{ShuntOhms: &ohms},
+		{CurrentA: &amps, ShuntOhms: &zero},
+	} {
+		if _, ok := p.PreciseShuntMV(); ok {
+			t.Errorf("%+v produced a drop it cannot know", p)
+		}
+	}
+}

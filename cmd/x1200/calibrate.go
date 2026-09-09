@@ -46,16 +46,24 @@ func calibrateCommand(args []string, out, errOut io.Writer, run pmic.Runner, sle
 		if err != nil {
 			return err
 		}
-		if reading.Power == nil || reading.Power.ShuntMV == nil || reading.Power.BusV == nil {
-			return fmt.Errorf("no INA219 shunt reading; is the ina2xx driver bound? run `x1200 doctor`")
+		if reading.Power == nil || reading.Power.BusV == nil {
+			return fmt.Errorf("no INA219 reading; is the ina2xx driver bound? run `x1200 doctor`")
+		}
+		// Never in0_input here. It is quantised to whole millivolts, and the whole signal is only a
+		// few millivolts wide, so fitting a slope to it fits the rounding. See Power.PreciseShuntMV.
+		dropMV, ok := reading.Power.PreciseShuntMV()
+		if !ok {
+			return fmt.Errorf("cannot derive the shunt drop: need both curr1_input and shunt_resistor; run `x1200 doctor`")
 		}
 		got, err := pmic.Read(run)
 		if err != nil {
 			return err
 		}
-		p := calibrate.Point{ShuntMV: *reading.Power.ShuntMV, BusV: *reading.Power.BusV, PMICWatts: got.Watts}
+		p := calibrate.Point{ShuntMV: dropMV, BusV: *reading.Power.BusV, PMICWatts: got.Watts}
 		points = append(points, p)
-		fmt.Fprintf(out, "  %2d/%d  drop %5.2f mV   rail %.3f V   pmic %5.3f W\n",
+		// Three decimals, because the point of deriving the drop from the current register is that
+		// it carries 10 uV resolution — printing it rounded to the millivolt would hide the fix.
+		fmt.Fprintf(out, "  %2d/%d  drop %6.3f mV   rail %.3f V   pmic %5.3f W\n",
 			i+1, *samples, p.ShuntMV, p.BusV, p.PMICWatts)
 	}
 
