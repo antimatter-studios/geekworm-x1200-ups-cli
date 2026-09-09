@@ -34,12 +34,36 @@ line gives no clue that it is describing charge direction.
 ```
 $ x1200 --json
 {
-  "battery":  { "percent": 80, "voltage_v": 4.023, "status": "Unknown", "present": true },
-  "power":    { "chip": "ina219", "bus_v": 5.04, "current_a": 0.526, "shunt_ohms": 0.005 },
-  "supply":   { "on_mains": false, "gpio_line": 6 },
-  "estimate": { "state": "discharging", "time_to_empty_s": 4140, "percent_per_hour": -68.6 }
+  "battery": {
+    "name": "battery",
+    "percent": 80,
+    "voltage_v": 4.023,
+    "status": "Unknown",
+    "present": true
+  },
+  "power": {
+    "name": "hwmon6",
+    "chip": "ina219",
+    "bus_v": 5.04,
+    "shunt_mv": 3,
+    "current_a": 0.526,
+    "watts_w": 2.66,
+    "shunt_ohms": 0.005
+  },
+  "estimate": {
+    "state": "discharging",
+    "percent_per_hour": -48.91323990545379,
+    "time_to_empty_s": 5887.9763548,
+    "samples": 10,
+    "span_s": 327.97404,
+    "note": "rate still settling; expect this to lengthen"
+  }
 }
 ```
+
+On a machine where GPIO6 is readable a `supply` object appears alongside these, carrying `on_mains`,
+`gpio_line` and — when the pin contradicts the gauge — `suspect`.
+
 
 ## Time remaining, and why the obvious method is wrong
 
@@ -82,6 +106,48 @@ percentage point of the last measured segment. The full capture is a test fixtur
 A run ends when the direction reverses, so charging is never averaged against discharging, and a
 plateau does not end one — sitting at 80% for several samples while the voltage falls is normal on a
 gauge that reports whole numbers.
+
+## Flags
+
+| flag | default | what it does |
+|---|---|---|
+| `--json` | off | machine-readable output |
+| `--watch` | `0` | repeat at an interval, e.g. `--watch 2s` |
+| `--history` | `/tmp/x1200-history` | sample store for the estimate; empty disables it |
+| `--window` | `2h` | how much history to keep and estimate from |
+| `--gpio` | on | read mains and charging state from GPIO |
+| `--chip` | auto | which gpiochip; empty picks the header controller |
+| `--root` | `/sys` | sysfs root, for running against captured files |
+| `--version` | | one-line identity; `x1200 version` for detail |
+
+`--root` is what makes this testable without hardware: point it at a directory of captured sysfs
+files and the whole program runs on any machine.
+
+## How it is put together
+
+Seven packages, each with one job, and the split follows a single rule: anything impure is injected
+so that the logic can be tested against a map literal on a laptop with no Raspberry Pi attached.
+
+| package | responsibility |
+|---|---|
+| `sysfs` | reads the kernel's small text files; the only real I/O is two closures in `OS()` |
+| `ups` | turns what the drivers publish into one reading, and renders it |
+| `estimate` | pure maths: a robust slope over samples, and a time remaining |
+| `history` | persists samples so a rate can be measured between invocations |
+| `gpio` | the Linux GPIO character device, by ioctl, with no external dependency |
+| `x1200` | the pin numbers and polarities specific to this board |
+| `build` | what this binary is and where it came from |
+
+`gpio` is the one place with `unsafe`, confined to a single `ioctl` function. Its struct layouts live
+in `abi.go` with **no build tag** on purpose: they describe Linux but do not need Linux to compile,
+so `go test` on any machine asserts the sizes, field offsets, ioctl request numbers and flag values
+against the constants from `linux/gpio.h`. That matters because this project has no access to the Pi
+it targets, and a struct one padding word out produces a bare `EINVAL` with nothing to say which
+field was wrong.
+
+`x1200` is where the genericity deliberately stops. Everything else finds devices by shape — a hwmon
+publishing a bus voltage, a current and a power is a power monitor whatever chip is underneath — but
+a pin number and a polarity are facts about one board and cannot be inferred from anything.
 
 ## It reads sysfs, not I2C
 
@@ -218,7 +284,7 @@ x1200
   source:   release
   commit:   2269a16724a91531f7255406ceb0c04f56cd031e
   built:    2026-09-09T07:08:39Z
-  go:       go1.24.0
+  go:       go1.24.0   # whatever built it
   platform: linux/arm64
 ```
 
