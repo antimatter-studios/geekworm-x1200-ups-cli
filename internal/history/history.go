@@ -12,9 +12,13 @@
 // describes a different situation from the one after it, and carrying it across would produce a
 // confident estimate from samples on the wrong side of an event.
 //
-// Format is one sample per line, space separated: unix seconds, percent, volts. Line-oriented
-// because appending is then a concatenation rather than a parse-modify-serialise cycle, and because
-// a human debugging this at 2am can read it with cat.
+// Format is one sample per line, space separated: unix seconds, percent, volts, and optionally
+// amps and watts. Line-oriented because appending is then a concatenation rather than a
+// parse-modify-serialise cycle, and because a human debugging this at 2am can read it with cat.
+//
+// The last two fields are optional so that a store written by an older version still parses. A
+// format change that silently discards accumulated history would be worst precisely when the
+// history matters — during an outage, when nobody wants to start counting again from zero.
 package history
 
 import (
@@ -38,6 +42,17 @@ type Sample struct {
 	At       time.Time
 	Percent  int
 	VoltageV float64
+	// CurrentA and WattsW are what the INA219 measured, and they are the whole reason this store
+	// grew past the gauge. The percentage is a model: during an observed unplug it fell to 85% under
+	// load and sprang back to 96% within a minute of the load coming off, which is cell sag being
+	// read as depletion rather than charge moving anywhere. Current is measured, so integrating it
+	// gives charge actually delivered.
+	//
+	// Zero is indistinguishable from absent here, which is acceptable: a genuine zero current means
+	// nothing is being drawn, and integrating nothing over any interval contributes nothing either
+	// way. That is not true of the percentage, which is why that one is not optional.
+	CurrentA float64
+	WattsW   float64
 }
 
 // Store is the two capabilities this package needs, injected in the same shape as sysfs.FS so that
@@ -110,7 +125,8 @@ func Parse(text string) []Sample {
 	var out []Sample
 	for _, line := range strings.Split(text, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 3 {
+		// Three fields is the original format and still valid; five carries the INA219 readings.
+		if len(fields) != 3 && len(fields) != 5 {
 			continue
 		}
 		secs, err := strconv.ParseInt(fields[0], 10, 64)
@@ -125,7 +141,18 @@ func Parse(text string) []Sample {
 		if err != nil {
 			continue
 		}
-		out = append(out, Sample{At: time.Unix(secs, 0).UTC(), Percent: pct, VoltageV: volts})
+		sample := Sample{At: time.Unix(secs, 0).UTC(), Percent: pct, VoltageV: volts}
+		if len(fields) == 5 {
+			// A malformed tail is dropped rather than failing the line: the timestamp and percentage
+			// are still usable, and half a sample beats none.
+			if amps, err := strconv.ParseFloat(fields[3], 64); err == nil {
+				sample.CurrentA = amps
+			}
+			if watts, err := strconv.ParseFloat(fields[4], 64); err == nil {
+				sample.WattsW = watts
+			}
+		}
+		out = append(out, sample)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
 	return out
@@ -135,7 +162,7 @@ func Parse(text string) []Sample {
 func Render(samples []Sample) string {
 	var b strings.Builder
 	for _, s := range samples {
-		fmt.Fprintf(&b, "%d %d %.4f\n", s.At.Unix(), s.Percent, s.VoltageV)
+		fmt.Fprintf(&b, "%d %d %.4f %.4f %.4f\n", s.At.Unix(), s.Percent, s.VoltageV, s.CurrentA, s.WattsW)
 	}
 	return b.String()
 }

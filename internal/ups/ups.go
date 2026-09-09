@@ -87,6 +87,52 @@ type Supply struct {
 	Suspect string `json:"suspect,omitempty"`
 }
 
+// Delivered is charge measured to have flowed, by integrating the INA219.
+//
+// Kept in its own group and named for what it is, because the whole point is that it is a
+// measurement where the battery percentage is a model. The gauge was observed reporting 85% under
+// load and 96% a minute after the load came off — cell sag read as depletion — so the two must never
+// be presentable as the same kind of claim.
+type Delivered struct {
+	MilliampHours float64 `json:"mah"`
+	WattHours     float64 `json:"wh"`
+	MeanCurrentA  float64 `json:"mean_current_a"`
+	// CoveredS is time actually integrated; SpanS is wall clock. They differ whenever the tool was
+	// not running, and the difference is the reader's only way to tell "this covers two hours" from
+	// "this covers the eleven minutes somebody was watching".
+	CoveredS float64 `json:"covered_s"`
+	SpanS    float64 `json:"span_s"`
+	// Note qualifies the figures; empty when they stand unqualified.
+	Note string `json:"note,omitempty"`
+	// RuntimeS is how long a declared capacity would last at the measured mean current, and is
+	// present only when a capacity was declared. It inherits that declaration's error in full.
+	RuntimeS *float64 `json:"runtime_s,omitempty"`
+	// CapacityMAh is the declared figure the runtime rests on, echoed so nobody has to guess which
+	// number produced the answer.
+	CapacityMAh *float64 `json:"declared_capacity_mah,omitempty"`
+	// ImpliedCapacityMAh is the pack's capacity worked backwards from the gauge's own discharge
+	// trend at the measured mean current, and it is the closest thing available to a measurement.
+	//
+	// Two independent sources are being combined: how fast the percentage is falling, and how much
+	// current is actually flowing. If the pack really held its declared capacity those would agree.
+	// Where they diverge, the declared figure is the suspect one — cells sold as 5000 mAh routinely
+	// hold half that, and the arithmetic says by how much rather than leaving it as a suspicion.
+	ImpliedCapacityMAh *float64 `json:"implied_capacity_mah,omitempty"`
+}
+
+// DriverDefaultShuntOhms is the value ina2xx assumes when nothing tells it otherwise.
+//
+// Worth naming because it is provably wrong on this board rather than merely unverified: 10 mOhm
+// implies 1.34 W entering a board whose own PMIC reports 2.73 W delivered to rails downstream of it,
+// and input cannot be less than what it feeds. Every current, power, mAh and Wh figure scales
+// linearly with it, so a reading taken at the default is roughly half what it should be.
+const DriverDefaultShuntOhms = 0.01
+
+// ShuntUncalibrated reports whether the shunt resistance is still the driver's guess.
+func (p *Power) ShuntUncalibrated() bool {
+	return p != nil && p.ShuntOhms != nil && *p.ShuntOhms == DriverDefaultShuntOhms
+}
+
 // Charging is whether the board is currently allowed to charge the pack.
 type Charging struct {
 	Enabled bool   `json:"enabled"`
@@ -100,6 +146,8 @@ type Reading struct {
 	// Supply and Charging come from GPIO rather than sysfs, so Read does not populate them either.
 	Supply   *Supply   `json:"supply,omitempty"`
 	Charging *Charging `json:"charging,omitempty"`
+	// Delivered is charge integrated from measured current, as distinct from the gauge's model.
+	Delivered *Delivered `json:"delivered,omitempty"`
 	// Estimate is how long the pack has left, and is the one field Read does not populate.
 	//
 	// It cannot: a duration is derived from how the numbers have moved, which needs stored samples

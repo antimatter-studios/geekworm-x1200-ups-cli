@@ -51,6 +51,7 @@ func Text(r *Reading) string {
 		{name: "battery", rows: batteryRows(r.Battery, r.Estimate, r.Supply)},
 		{name: "power", rows: powerRows(r.Power)},
 		{name: "supply", rows: supplyRows(r.Supply, r.Charging)},
+		{name: "delivered", rows: deliveredRows(r.Delivered)},
 		{name: "estimate", rows: estimateRows(r.Estimate)},
 	}
 
@@ -187,6 +188,14 @@ func powerRows(p *Power) []row {
 			value += "  (" + strings.Join(detail, ", ") + ")"
 		}
 		rows = append(rows, row{"shunt", value})
+		// Said in the output rather than only in the README, because every current, power, mAh and
+		// Wh figure above and below is scaled by this constant. A reader who does not know it is the
+		// driver's untouched guess has no way to tell that the numbers are about half what they
+		// should be — and "about half" is the difference between a UPS lasting an hour and two.
+		if p.ShuntUncalibrated() {
+			rows = append(rows, row{"UNCALIBRATED",
+				"shunt is the ina2xx default and is provably wrong here; every current, power, mAh and Wh figure is likely ~2x low. run `x1200 calibrate`"})
+		}
 	}
 	return rows
 }
@@ -220,6 +229,47 @@ func supplyRows(s *Supply, c *Charging) []row {
 			state = "enabled"
 		}
 		rows = append(rows, row{"charging", fmt.Sprintf("%s  (GPIO%d)", state, c.Line)})
+	}
+	return rows
+}
+
+// deliveredRows renders charge measured to have flowed.
+//
+// Separate from the battery group on purpose. The percentage is a model and this is a measurement,
+// and the gauge has been observed reporting an eleven-point swing in sixty seconds that no charge
+// movement could account for. Presenting the two side by side under one heading would invite exactly
+// the confusion the group exists to prevent.
+func deliveredRows(d *Delivered) []row {
+	if d == nil {
+		return nil
+	}
+	rows := []row{
+		{"charge", fmt.Sprintf("%.1f mAh", d.MilliampHours)},
+		{"energy", fmt.Sprintf("%.2f Wh", d.WattHours)},
+		{"mean", fmt.Sprintf("%.3f A", d.MeanCurrentA)},
+	}
+	// Both times, always, and never just one. Equal values say the tool ran throughout; a covered
+	// time well below the span says the totals describe only the minutes somebody was watching.
+	rows = append(rows, row{"measured over", fmt.Sprintf("%s of %s elapsed",
+		humanDuration(time.Duration(d.CoveredS)*time.Second),
+		humanDuration(time.Duration(d.SpanS)*time.Second))})
+
+	if d.RuntimeS != nil && d.CapacityMAh != nil {
+		rows = append(rows, row{"runtime", fmt.Sprintf("%s at this rate  (assumes %.0f mAh declared, NOT measured)",
+			humanDuration(time.Duration(*d.RuntimeS)*time.Second), *d.CapacityMAh)})
+	}
+	if d.ImpliedCapacityMAh != nil {
+		value := fmt.Sprintf("%.0f mAh, from the discharge trend at the measured current", *d.ImpliedCapacityMAh)
+		if d.CapacityMAh != nil && *d.CapacityMAh > 0 {
+			ratio := *d.CapacityMAh / *d.ImpliedCapacityMAh
+			if ratio >= 1.5 {
+				value += fmt.Sprintf("  —  the declared %.0f mAh is %.1fx higher", *d.CapacityMAh, ratio)
+			}
+		}
+		rows = append(rows, row{"implied capacity", value})
+	}
+	if d.Note != "" {
+		rows = append(rows, row{"note", d.Note})
 	}
 	return rows
 }

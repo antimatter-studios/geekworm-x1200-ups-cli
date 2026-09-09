@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/build"
+	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/coulomb"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/estimate"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/gpio"
 	"github.com/antimatter-studios/geekworm-x1200-ups-cli/internal/history"
@@ -25,13 +26,14 @@ import (
 // options is what the flags parsed to, kept separate from the parsing so that run can be exercised
 // without a process, a clock or a real filesystem.
 type options struct {
-	root    string
-	json    bool
-	watch   time.Duration
-	history string
-	window  time.Duration
-	gpio    bool
-	chip    string
+	root     string
+	json     bool
+	watch    time.Duration
+	history  string
+	window   time.Duration
+	gpio     bool
+	chip     string
+	capacity float64
 }
 
 // Defaults for the sample store.
@@ -95,6 +97,10 @@ func parse(args []string, errOut io.Writer) (opts options, done bool, err error)
 	fs.DurationVar(&opts.window, "window", defaultWindow, "how much history to keep and estimate from")
 	fs.BoolVar(&opts.gpio, "gpio", true, "read mains presence and charging state from GPIO")
 	fs.StringVar(&opts.chip, "chip", "", "gpiochip to use; empty picks the header controller")
+	// Declared, never inferred: the hardware cannot know what cells are fitted. Also frequently
+	// wrong — 18650 chemistry caps around 3500 mAh a cell, and anything sold as 5000+ is commonly
+	// overstated two- or threefold — so a runtime derived from it says so wherever it is reported.
+	fs.Float64Var(&opts.capacity, "capacity-mah", 0, "declared pack capacity, for a runtime estimate; 0 omits it")
 
 	if err := fs.Parse(args); err != nil {
 		return opts, false, err
@@ -144,7 +150,10 @@ func once(fs sysfs.FS, now func() time.Time, store history.Store, port gpio.Port
 	if opts.gpio {
 		supply(reading, port, opts.chip)
 	}
-	reading.Estimate = track(reading, now, store, opts.window)
+	samples := track(reading, now, store, opts.window)
+	reading.Estimate = estimateFrom(reading, samples)
+	reading.Delivered = deliveredFrom(samples, opts.capacity)
+	implyCapacity(reading)
 	corroborate(reading)
 	if opts.json {
 		return ups.JSON(reading)
@@ -152,11 +161,11 @@ func once(fs sysfs.FS, now func() time.Time, store history.Store, port gpio.Port
 	return ups.Text(reading), nil
 }
 
-// track records this reading and returns what the accumulated samples imply.
+// track records this reading and returns the accumulated samples.
 //
 // Returns nil when there is nothing to record against — no store configured, or a gauge that cannot
-// report a percentage — because an estimate with no basis should be absent rather than empty.
-func track(reading *ups.Reading, now func() time.Time, store history.Store, window time.Duration) *estimate.Estimate {
+// report a percentage — because a derived figure with no basis should be absent rather than empty.
+func track(reading *ups.Reading, now func() time.Time, store history.Store, window time.Duration) []history.Sample {
 	if store.Read == nil || store.Write == nil {
 		return nil
 	}
@@ -174,11 +183,28 @@ func track(reading *ups.Reading, now func() time.Time, store history.Store, wind
 	if reading.Battery.VoltageV != nil {
 		sample.VoltageV = *reading.Battery.VoltageV
 	}
+	// The INA219 readings are what makes integration possible, so they are recorded even though the
+	// gauge is what the sample is keyed on.
+	if reading.Power != nil {
+		if reading.Power.CurrentA != nil {
+			sample.CurrentA = *reading.Power.CurrentA
+		}
+		if reading.Power.WattsW != nil {
+			sample.WattsW = *reading.Power.WattsW
+		}
+	}
 
 	samples, err := history.Append(store, sample, window, maxSamples)
 	if err != nil {
-		// Report the reading anyway; say why the estimate is missing rather than swallowing it.
-		return &estimate.Estimate{State: estimate.Unknown, Note: "history unavailable: " + err.Error()}
+		return nil
+	}
+	return samples
+}
+
+// estimateFrom derives the percentage-based estimate.
+func estimateFrom(reading *ups.Reading, samples []history.Sample) *estimate.Estimate {
+	if len(samples) == 0 {
+		return nil
 	}
 	// Tell the estimator what the mains pin measured, where it was readable. It uses this only to
 	// sharpen its wording: a pack that is definitely on battery but has not yet dropped a whole
@@ -186,6 +212,37 @@ func track(reading *ups.Reading, now func() time.Time, store history.Store, wind
 	onBattery := reading.Supply != nil && !reading.Supply.OnMains
 	est := estimate.From(samples, onBattery)
 	return &est
+}
+
+// deliveredFrom integrates the measured current into charge.
+//
+// Absent rather than zero when there is too little to say. A charge total of 0.0 mAh reads as "no
+// current flowed", which is a claim about the hardware; the absence of the group reads as "not
+// enough measurement yet", which is a claim about the observation. Only the second is true early on.
+func deliveredFrom(samples []history.Sample, capacityMAh float64) *ups.Delivered {
+	if len(samples) < 2 {
+		return nil
+	}
+	charge := coulomb.Integrate(samples)
+	note, usable := coulomb.Confidence(charge)
+	if !usable {
+		return nil
+	}
+
+	out := &ups.Delivered{
+		MilliampHours: charge.MilliampHours,
+		WattHours:     charge.WattHours,
+		MeanCurrentA:  charge.MeanCurrentA,
+		CoveredS:      charge.CoveredS,
+		SpanS:         charge.SpanS,
+		Note:          note,
+	}
+	if runtime, ok := coulomb.Runtime(charge, capacityMAh); ok {
+		secs := runtime.Seconds()
+		out.RuntimeS = &secs
+		out.CapacityMAh = &capacityMAh
+	}
+	return out
 }
 
 // supply attaches the mains and charging state read from GPIO.
@@ -283,4 +340,37 @@ func corroborate(reading *ups.Reading) {
 	reading.Supply.Suspect = fmt.Sprintf(
 		"GPIO%d reads mains but the pack is draining; a floating pin also reads mains, so check the HAT is seated",
 		reading.Supply.Line)
+}
+
+// implyCapacity works the pack's real capacity backwards from two independent measurements.
+//
+// The gauge says how fast the percentage is falling; the INA219 says how much current is flowing.
+// Together those imply a capacity: if the percentage will reach zero in four hours while half an amp
+// flows, the pack holds about two amp-hours from where it is now, and scaling by the present state
+// of charge gives the full figure.
+//
+// This is worth having because a declared capacity cannot be checked any other way without running
+// a pack flat, and declared capacities are unreliable in a known direction — 18650 chemistry caps
+// around 3500 mAh a cell, so anything sold as 5000 mAh is overstated. Where the implied figure comes
+// out well below the declared one, the declared one is the suspect.
+//
+// It inherits the shunt error in full, so it is only as good as the calibration. That is not a
+// reason to withhold it: the shunt is reported alongside, and a figure that is wrong by a known
+// factor still settles whether a claim is out by two- or threefold.
+func implyCapacity(reading *ups.Reading) {
+	d, e := reading.Delivered, reading.Estimate
+	if d == nil || e == nil || e.TimeToEmpty == nil || d.MeanCurrentA <= 0 {
+		return
+	}
+	if reading.Battery == nil || reading.Battery.Percent == nil {
+		return
+	}
+	percent := float64(*reading.Battery.Percent)
+	if percent <= 0 {
+		return
+	}
+	// Charge left from here, then scaled up to a full pack by the present state of charge.
+	remainingMAh := d.MeanCurrentA * 1000 * e.TimeToEmpty.Hours()
+	full := remainingMAh / (percent / 100)
+	d.ImpliedCapacityMAh = &full
 }
