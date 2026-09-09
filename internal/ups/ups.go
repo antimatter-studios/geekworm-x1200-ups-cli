@@ -93,6 +93,23 @@ type Supply struct {
 // measurement where the battery percentage is a model. The gauge was observed reporting 85% under
 // load and 96% a minute after the load came off — cell sag read as depletion — so the two must never
 // be presentable as the same kind of claim.
+//
+// # Why the totals are withheld by default
+//
+// Integrating a current only means something if you know which circuit it flows through, and on this
+// board that is not established. Measured on hardware against a load that doubled, the INA219 read
+// 525 mA while idle, 267 mA at full load, and a sustained 417 mA only after the load was killed. It
+// was also flat across a mains transition, reading 0.264-0.271 A on battery and 0.266-0.301 A on
+// mains. There is no correlation with the Pi's consumption in either direction, and Geekworm
+// documents neither the chip nor its shunt.
+//
+// So the signal is real, stable and correctly read — and unidentified. Turning it into milliamp
+// hours and then into an implied pack capacity would produce confident figures from a current whose
+// circuit nobody can name, which is worse than reporting nothing: it looks like a measurement.
+//
+// The mean current and the coverage are still reported, because those are facts about the signal
+// itself rather than interpretations of it. The totals require --trust-current, which is a claim the
+// operator makes and the tool cannot.
 type Delivered struct {
 	MilliampHours float64 `json:"mah"`
 	WattHours     float64 `json:"wh"`
@@ -104,6 +121,9 @@ type Delivered struct {
 	SpanS    float64 `json:"span_s"`
 	// Note qualifies the figures; empty when they stand unqualified.
 	Note string `json:"note,omitempty"`
+	// Unverified is set when the current's circuit is not established, and is the reason the totals
+	// are absent. Empty when the operator has asserted --trust-current.
+	Unverified string `json:"unverified,omitempty"`
 	// RuntimeS is how long a declared capacity would last at the measured mean current, and is
 	// present only when a capacity was declared. It inherits that declaration's error in full.
 	RuntimeS *float64 `json:"runtime_s,omitempty"`

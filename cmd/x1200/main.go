@@ -38,7 +38,16 @@ type options struct {
 	capacity float64
 	maxGap   time.Duration
 	archive  string
+	// trustCurrent is the operator asserting that they know what the INA219 measures. The tool
+	// cannot establish it, so it cannot default to true.
+	trustCurrent bool
 }
+
+// unverifiedCurrent is why the charge totals are withheld.
+//
+// Stated in the output rather than left to the README, because the figures it suppresses are ones a
+// reader would otherwise expect to see, and their absence needs a reason attached.
+const unverifiedCurrent = "charge and energy need the current's circuit identified; on this board the INA219 does not track the Pi's load (525mA idle, 267mA at full load), so integrating it would name a quantity nobody can. pass --trust-current if you have established what it measures"
 
 // Defaults for the sample store.
 //
@@ -115,6 +124,7 @@ func parse(args []string, errOut io.Writer) (opts options, done bool, err error)
 	// Must be at least the sampling interval or every interval is refused and the charge figures
 	// silently vanish. The systemd unit passes its own timer interval for exactly that reason.
 	fs.DurationVar(&opts.maxGap, "max-gap", coulomb.MaxGap, "longest gap between samples that may be integrated across")
+	fs.BoolVar(&opts.trustCurrent, "trust-current", false, "report charge and energy totals; requires knowing what the INA219 measures")
 
 	if err := fs.Parse(args); err != nil {
 		return opts, false, err
@@ -169,8 +179,10 @@ func once(fs sysfs.FS, now func() time.Time, store history.Store, port gpio.Port
 	// sample describes a load that may no longer exist. The integrator below wants everything, since
 	// charge delivered over a long period is the whole point of keeping a long period.
 	reading.Estimate = estimateFrom(reading, history.Recent(samples, now(), window(opts)))
-	reading.Delivered = deliveredFrom(samples, opts.capacity, opts.maxGap)
-	implyCapacity(reading)
+	reading.Delivered = deliveredFrom(samples, opts.capacity, opts.maxGap, opts.trustCurrent)
+	if opts.trustCurrent {
+		implyCapacity(reading)
+	}
 	corroborate(reading)
 	if opts.json {
 		return ups.JSON(reading)
@@ -244,7 +256,7 @@ func estimateFrom(reading *ups.Reading, samples []history.Sample) *estimate.Esti
 // Absent rather than zero when there is too little to say. A charge total of 0.0 mAh reads as "no
 // current flowed", which is a claim about the hardware; the absence of the group reads as "not
 // enough measurement yet", which is a claim about the observation. Only the second is true early on.
-func deliveredFrom(samples []history.Sample, capacityMAh float64, maxGap time.Duration) *ups.Delivered {
+func deliveredFrom(samples []history.Sample, capacityMAh float64, maxGap time.Duration, trustCurrent bool) *ups.Delivered {
 	if len(samples) < 2 {
 		return nil
 	}
@@ -261,6 +273,10 @@ func deliveredFrom(samples []history.Sample, capacityMAh float64, maxGap time.Du
 		CoveredS:      charge.CoveredS,
 		SpanS:         charge.SpanS,
 		Note:          note,
+	}
+	if !trustCurrent {
+		out.Unverified = unverifiedCurrent
+		return out
 	}
 	if runtime, ok := coulomb.Runtime(charge, capacityMAh); ok {
 		secs := runtime.Seconds()

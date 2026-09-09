@@ -306,7 +306,7 @@ func TestDeliveredRowsAreSeparateFromTheGauge(t *testing.T) {
 	if find(rows, "charge") != "123.4 mAh" {
 		t.Errorf("charge = %q", find(rows, "charge"))
 	}
-	if find(rows, "energy") == "" || find(rows, "mean") == "" {
+	if find(rows, "energy") == "" || find(rows, "mean current") == "" {
 		t.Errorf("rows = %+v", rows)
 	}
 	// Both times always, so a reader can see whether the total covers the period it appears to.
@@ -339,5 +339,55 @@ func TestDeliveredRuntimeSaysItRestsOnADeclaration(t *testing.T) {
 	bare := deliveredRows(&Delivered{MilliampHours: 100, MeanCurrentA: 0.5, CoveredS: 600, SpanS: 600})
 	if find(bare, "runtime") != "" {
 		t.Error("produced a runtime with no declared capacity")
+	}
+}
+
+// Integrating a current only means something if you know which circuit it flows through, and on this
+// board that is not established: the INA219 read 525 mA idle and 267 mA at full load, and was flat
+// across a mains transition. A confident mAh figure from an unidentified signal is worse than none,
+// because it looks like a measurement.
+func TestDeliveredWithholdsTotalsWhileTheCurrentIsUnidentified(t *testing.T) {
+	implied, runtime, capacity := 2600.0, 7200.0, 6000.0
+	d := &Delivered{
+		MilliampHours: 123.4, WattHours: 0.62, MeanCurrentA: 0.52, CoveredS: 600, SpanS: 600,
+		ImpliedCapacityMAh: &implied, RuntimeS: &runtime, CapacityMAh: &capacity,
+		Unverified: "the circuit is not established",
+	}
+	rows := deliveredRows(d)
+
+	for _, withheld := range []string{"charge", "energy", "implied capacity", "runtime"} {
+		if got := find(rows, withheld); got != "" {
+			t.Errorf("%s = %q; must be withheld while the signal is unidentified", withheld, got)
+		}
+	}
+	// The mean and the coverage are facts about the signal rather than interpretations of it, so
+	// they stand: withholding them would hide the evidence that something is being measured at all.
+	if find(rows, "mean current") == "" {
+		t.Error("the mean current was withheld; it is a fact about the signal, not an interpretation")
+	}
+	if find(rows, "measured over") == "" {
+		t.Error("coverage was withheld")
+	}
+	// The absence needs its reason attached, since a reader expects these figures to be present.
+	if find(rows, "WITHHELD") == "" {
+		t.Error("totals vanished with no explanation")
+	}
+}
+
+// Once an operator asserts they know what the signal is, everything reports as before.
+func TestDeliveredReportsEverythingOnceTrusted(t *testing.T) {
+	implied := 2600.0
+	d := &Delivered{
+		MilliampHours: 123.4, WattHours: 0.62, MeanCurrentA: 0.52, CoveredS: 600, SpanS: 600,
+		ImpliedCapacityMAh: &implied,
+	}
+	rows := deliveredRows(d)
+	for _, want := range []string{"charge", "energy", "implied capacity"} {
+		if find(rows, want) == "" {
+			t.Errorf("%s missing with no Unverified set", want)
+		}
+	}
+	if find(rows, "WITHHELD") != "" {
+		t.Error("a trusted reading still carried a withholding notice")
 	}
 }

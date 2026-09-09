@@ -117,6 +117,7 @@ gauge that reports whole numbers.
 | `--window` | `2h` | how much recent history the rate estimate looks at |
 | `--max-gap` | `2m` | longest gap between samples that may be integrated across |
 | `--capacity-mah` | `0` | declared pack capacity, for a runtime estimate; 0 omits it |
+| `--trust-current` | off | report charge/energy totals; needs the INA219's circuit identified |
 | `--gpio` | on | read mains and charging state from GPIO |
 | `--chip` | auto | which gpiochip; empty picks the header controller |
 | `--root` | `/sys` | sysfs root, for running against captured files |
@@ -279,6 +280,44 @@ delivered
   implied capacity: 2600 mAh, from the discharge trend at the measured current
                     —  the declared 6000 mAh is 2.3x higher
 ```
+
+### The totals are withheld, and why
+
+```
+delivered
+  mean current:  0.520 A
+  measured over: 20m of 20m elapsed
+  WITHHELD:      charge and energy need the current's circuit identified; on this board
+                 the INA219 does not track the Pi's load (525mA idle, 267mA at full
+                 load), so integrating it would name a quantity nobody can.
+                 pass --trust-current if you have established what it measures
+```
+
+Integrating a current only means something if you know which circuit it flows through, and **on this
+board that is not established.** Measured against a load that doubled:
+
+```
+IDLE    curr=525 mA   pmic=2.72 W
+LOAD    curr=267 mA   pmic=5.13 W     <- full load, lowest current
+AFTER   curr=417 mA                   <- sustained, after the load was killed
+```
+
+It also sat flat across a mains transition — 0.264–0.271 A on battery, 0.266–0.301 A on mains — and
+`hwmon` exposes no `update_interval`, so this is not a stale cache. Geekworm documents neither the
+chip nor its shunt, and no schematic is published.
+
+So the signal is real, stable and correctly read — and **unidentified**. Turning it into milliamp
+hours and then into an implied pack capacity would produce confident figures from a current whose
+circuit nobody can name, which is worse than reporting nothing, because it looks like a measurement.
+
+The mean current and the coverage are still shown: those are facts about the signal rather than
+interpretations of it, and hiding them would conceal the evidence that anything is being measured at
+all. The totals need `--trust-current`, which is a claim the operator makes and the tool cannot.
+
+That is also why `x1200 calibrate` cannot presently succeed. Fitting the INA219 against the PMIC
+assumes both instruments see the same current; they do not, so the fit is between unrelated signals
+and correctly refuses. Two calibrations have now been rejected for two different reasons, which is
+the best evidence available that the refusal logic is right.
 
 `delivered` is kept apart from `battery` deliberately: the percentage is a *model* and this is a
 *measurement*, and the gauge has been observed swinging eleven points in sixty seconds with no

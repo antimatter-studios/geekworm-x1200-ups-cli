@@ -243,10 +243,14 @@ func deliveredRows(d *Delivered) []row {
 	if d == nil {
 		return nil
 	}
-	rows := []row{
-		{"charge", fmt.Sprintf("%.1f mAh", d.MilliampHours)},
-		{"energy", fmt.Sprintf("%.2f Wh", d.WattHours)},
-		{"mean", fmt.Sprintf("%.3f A", d.MeanCurrentA)},
+	// The mean and the coverage describe the signal; the totals interpret it. Only the first pair can
+	// be stated while the current's circuit is unknown.
+	rows := []row{{"mean current", fmt.Sprintf("%.3f A", d.MeanCurrentA)}}
+	if d.Unverified == "" {
+		rows = append(rows,
+			row{"charge", fmt.Sprintf("%.1f mAh", d.MilliampHours)},
+			row{"energy", fmt.Sprintf("%.2f Wh", d.WattHours)},
+		)
 	}
 	// Both times, always, and never just one. Equal values say the tool ran throughout; a covered
 	// time well below the span says the totals describe only the minutes somebody was watching.
@@ -254,11 +258,14 @@ func deliveredRows(d *Delivered) []row {
 		humanDuration(time.Duration(d.CoveredS)*time.Second),
 		humanDuration(time.Duration(d.SpanS)*time.Second))})
 
-	if d.RuntimeS != nil && d.CapacityMAh != nil {
+	if d.Unverified == "" && d.RuntimeS != nil && d.CapacityMAh != nil {
 		rows = append(rows, row{"runtime", fmt.Sprintf("%s at this rate  (assumes %.0f mAh declared, NOT measured)",
 			humanDuration(time.Duration(*d.RuntimeS)*time.Second), *d.CapacityMAh)})
 	}
-	if d.ImpliedCapacityMAh != nil {
+	if d.Unverified != "" {
+		rows = append(rows, row{"WITHHELD", d.Unverified})
+	}
+	if d.Unverified == "" && d.ImpliedCapacityMAh != nil {
 		value := fmt.Sprintf("%.0f mAh, from the discharge trend at the measured current", *d.ImpliedCapacityMAh)
 		if d.CapacityMAh != nil && *d.CapacityMAh > 0 {
 			ratio := *d.CapacityMAh / *d.ImpliedCapacityMAh
