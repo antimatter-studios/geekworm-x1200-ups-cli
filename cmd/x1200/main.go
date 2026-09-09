@@ -57,8 +57,8 @@ const unverifiedCurrent = "charge and energy need the current's circuit identifi
 // tail and the integrator wants everything, which is two views of one file, not two files.
 //
 // Appending is what makes /var/lib affordable. A whole-file rewrite costs tens of kilobytes per
-// sample and this Pi has already destroyed one SD card that way; an append costs about forty-five
-// bytes, and the rewrite happens only when the file passes maxArchiveBytes.
+// sample, and write amplification is how SD cards in Raspberry Pis die; an append costs about
+// forty-five bytes, and the rewrite happens only when the file passes maxArchiveBytes.
 const (
 	defaultStore = "/var/lib/x1200/samples"
 	// defaultWindow is how much history the rate estimate looks at, not how much is kept.
@@ -433,8 +433,9 @@ func implyCapacity(reading *ups.Reading) {
 // systemdCommand prints the unit files.
 //
 // Printed rather than installed. Writing to /etc and enabling a timer are decisions about what the
-// machine does, and this machine is described by Pulumi — a tool that configures it directly is how
-// a system stops matching its own description. So this emits text and something else decides.
+// machine does. On a machine described by configuration management, a tool that configures it
+// directly is how a system stops matching its own description. So this emits text and something
+// else decides.
 //
 // It exists because the program is no longer only a binary. The Debian package installs these units;
 // a tarball download installs nothing but the binary, and this is how that user gets the same files
@@ -475,7 +476,8 @@ func systemdCommand(args []string, out, errOut io.Writer) error {
 // Separate from the default read for one reason: it appends rather than rewriting. The rate window
 // under /tmp is small and rewritten whole, which is fine in a tmpfs. The archive lives on the SD
 // card, and rewriting a 60 kB file every five minutes is 17 MB a day of write amplification on a
-// machine that has already destroyed one card. Appending a line costs about 45 bytes.
+// machine where write amplification is the usual way cards die. Appending a line costs about 45
+// bytes.
 func recordCommand(args []string, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("x1200 record", flag.ContinueOnError)
 	fs.SetOutput(errOut)

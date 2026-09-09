@@ -101,7 +101,7 @@ nfpms:
       preremove: packaging/preremove.sh
 
 checksum:
-  # The file a Pulumi resource verifies a download against, so that installing this is checked
+  # The file whatever installs this verifies a download against, so that installing it is checked
   # rather than trusted.
   name_template: checksums.txt
 

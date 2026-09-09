@@ -50,7 +50,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Printed into the log so that whoever bumps the Pulumi DebPackage resource can read the
-      # checksum out of the run rather than downloading the asset to compute it themselves.
+      # Printed into the log so that whoever packages or deploys this can read the checksum out of
+      # the run rather than downloading the asset to compute it themselves.
       - name: checksums
         run: cat dist/checksums.txt

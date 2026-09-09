@@ -32,8 +32,8 @@ build:
 arm64:
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-arm64 ./cmd/$(BINARY)
 
-# For trying a build on real hardware. Installing it properly is Pulumi's job, in the
-# homelab-server stack — this target is for the loop before that is worth doing.
+# For trying a build on real hardware. Installing it properly is a job for whatever configuration
+# management describes the machine — this target is for the loop before that is worth doing.
 deploy: arm64
 	scp dist/$(BINARY)-linux-arm64 $(HOST):/tmp/$(BINARY)
 	ssh $(HOST) 'sudo install -m 0755 /tmp/$(BINARY) /usr/local/bin/$(BINARY) && $(BINARY) version'

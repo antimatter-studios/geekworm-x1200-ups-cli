@@ -243,8 +243,8 @@ recent tail and the integrator wants all of it; that is two views of one file.
 
 **It appends rather than rewriting, and that is not a detail.** Rewriting the whole store on every
 sample costs its full size each time: at a few thousand samples that is tens of kilobytes, and 288
-samples a day is around 17 MB daily, 6 GB a year of write amplification. This Pi has already
-destroyed one SD card exactly that way. An append costs about 45 bytes — some 300× less — and the
+samples a day is around 17 MB daily, 6 GB a year of write amplification, which is how SD cards
+in Raspberry Pis die. An append costs about 45 bytes — some 300× less — and the
 full rewrite happens only when the file passes 1 MB, at which point it is pruned in one pass.
 
 ### The gap tolerance, which will bite you if you change the interval
@@ -694,5 +694,5 @@ thing in the program is the pair of closures `sysfs.OS` returns. That is what ma
 no hardware — `sysfs.Map` is a filesystem made of a map literal, so the discovery logic and all the
 arithmetic run against fixtures on any machine.
 
-Installing this properly is [Pulumi's](https://www.pulumi.com) job in the `homelab-server` stack.
+Installing this properly is a job for whatever configuration management describes your machine.
 `make deploy` exists for the loop before that is worth doing.

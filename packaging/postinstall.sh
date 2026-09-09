@@ -4,9 +4,9 @@ set -e
 # Deliberately does NOT enable the timer.
 #
 # Installing a package should not start a machine writing to its own SD card every five minutes.
-# That is a decision about what the machine does, and it belongs to whoever runs the machine — here
-# it is declared in a Pulumi stack, and a package that enabled itself would put the machine out of
-# step with its own description.
+# That is a decision about what the machine does, and it belongs to whoever runs the machine. Where
+# services are declared by configuration management, a package that enabled itself would put the
+# machine out of step with its own description.
 systemctl daemon-reload >/dev/null 2>&1 || true
 
 cat <<'EOF'

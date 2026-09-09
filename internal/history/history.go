@@ -10,9 +10,9 @@
 // which is worth more the longer it runs and is the only way to measure real capacity.
 //
 // It is written by appending, and that is not a detail. Rewriting the file on every sample costs its
-// full size each time — at a few thousand samples, tens of kilobytes — and this Pi has already
-// destroyed one SD card through write amplification. Appending one line costs about forty-five
-// bytes, and the full rewrite happens only when the file has grown past a cap.
+// full size each time — at a few thousand samples, tens of kilobytes — and write amplification is
+// how SD cards in Raspberry Pis die. Appending one line costs about forty-five bytes, and the full
+// rewrite happens only when the file has grown past a cap.
 //
 // Surviving a reboot used to be an argument against persistence, on the grounds that a rate measured
 // before a power cycle describes a different machine. It is handled instead: a gap longer than the
@@ -76,8 +76,8 @@ type Store struct {
 // This exists for SD card wear, and the arithmetic is why. Rewriting the whole store on every
 // sample costs its full size per write: at 2000 samples that is around 60 kB, and a five-minute
 // timer makes 288 writes a day, so about 17 MB daily and 6 GB a year of write amplification. This
-// Pi has already destroyed one SD card. Appending one line costs about 45 bytes, some 300 times
-// less, and the full rewrite then happens only when the file actually needs pruning.
+// write amplification is how SD cards in Raspberry Pis die. Appending one line costs about 45
+// bytes, some 300 times less, and the full rewrite then happens only when the file needs pruning.
 type Appendable struct {
 	Store
 	// Add appends one sample without reading or rewriting what is already there.
