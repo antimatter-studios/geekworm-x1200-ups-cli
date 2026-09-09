@@ -5,18 +5,39 @@ UPS HAT on a Raspberry Pi 5.
 
 ```
 $ x1200
-battery     95%   4.152 V   unknown
-power       5.06 V   0.267 A   1.34 W
-          shunt 10.000 mOhm, drop 3 mV, ina219
-remaining   4h12m   -22.6%/h
+battery
+  charge:    80%
+  voltage:   4.023 V
+  state:     on battery — mains lost
+
+power
+  bus:       5.04 V
+  current:   0.526 A
+  draw:      2.66 W
+  shunt:     5.000 mOhm  (drop 3 mV, ina219)
+
+supply
+  source:    battery — MAINS LOST  (GPIO6)
+  charging:  disabled  (GPIO16)
+
+estimate
+  state:     discharging
+  remaining: 1h09m
+  rate:      -68.6%/h
+  note:      rate still settling; expect this to lengthen
 ```
+
+Every value carries its own key. An earlier version put them in columns and left the reader to work
+out which was which, which failed worst on the gauge's `status`: a bare `unknown` at the end of a
+line gives no clue that it is describing charge direction.
 
 ```
 $ x1200 --json
 {
-  "battery": { "name": "battery", "percent": 95, "voltage_v": 4.1525, "status": "Unknown", "present": true },
-  "power":   { "name": "hwmon6", "chip": "ina219", "bus_v": 5.06, "shunt_mv": 3,
-               "current_a": 0.267, "watts_w": 1.34, "shunt_ohms": 0.01 }
+  "battery":  { "percent": 80, "voltage_v": 4.023, "status": "Unknown", "present": true },
+  "power":    { "chip": "ina219", "bus_v": 5.04, "current_a": 0.526, "shunt_ohms": 0.005 },
+  "supply":   { "on_mains": false, "gpio_line": 6 },
+  "estimate": { "state": "discharging", "time_to_empty_s": 4140, "percent_per_hour": -68.6 }
 }
 ```
 
@@ -105,16 +126,57 @@ Once asserted, the modules autoload from the modalias. A device tree overlay
 the INA219, so using it would describe one chip through the device tree and the other through sysfs —
 two mechanisms, and a reboot needed to change one but not the other.
 
+## Mains or battery, and why it needs a GPIO
+
+Nothing on the I2C bus can tell you whether the machine is running on mains — which is usually the
+whole point of owning a UPS. The fuel gauge measures charge, not direction, so `status` reads
+`Unknown` permanently and always will. The INA219 sits *downstream* of the changeover, so it
+measures the same load either way. Neither chip can see the difference.
+
+The board signals it on **GPIO6** instead, and the polarity is from Geekworm's hardware wiki:
+"Low-power supply failed, High-power supply OK". High is mains.
+
+That pin needs configuring before it can be read at all. An unconfigured line has no level —
+`pinctrl get 6` shows `--` in the level column — so no amount of polling will catch an edge. Put
+this in `/boot/firmware/config.txt` and reboot:
+
+```
+gpio=6=ip,pu
+```
+
+**GPIO16 is charging control, and it is active LOW.** The vendor disables charging with
+`pinctrl set 16 op dh` and enables it with `op dl`. The related X728 is the other way round, so
+anyone reasoning from that board — or from the intuition that high means on — disables charging while
+believing they enabled it. Leaving the pin undriven lets the board charge normally, which is why
+nothing here forces a level at boot.
+
+### A high reading is weaker evidence than a low one
+
+The line is read with a pull-up, so a floating pin reads high, and high means mains. A HAT that is
+not seated, a pogo-pin contact gone intermittent, or the board removed entirely all report that
+everything is fine. **The detector's failure mode is to say nothing is wrong.**
+
+So a mains reading is cross-checked against the pack. A falling percentage is a measurement rather
+than an absence, from a different chip on a different bus — and during an observed outage it was the
+only source that told the truth. Where the two disagree, the output says so:
+
+```
+supply
+  source:   mains  (GPIO6)
+  SUSPECT:  GPIO6 reads mains but the pack is draining; a floating pin also
+            reads mains, so check the HAT is seated
+```
+
+Deliberately not resolved in favour of either. Overriding the pin would be a guess about which
+sensor is broken. Anything automatic built on this must treat a suspect reading as "assume the
+worst".
+
 ## Known limitations, and why they are not bugs
 
-**`status` reads `Unknown`, permanently.** A fuel gauge measures charge; whether the pack is charging
-or discharging is the charger's business, and there is no charger chip on the I2C bus to ask. The
-X1200 signals mains presence on a GPIO instead, which is a different source. Reading it is the next
-thing to build.
-
-**There is no time-remaining.** The MAX17040 is a voltage-based gauge: it publishes a percentage and
-a cell voltage and nothing else — no `charge_full`, no `current_now`. Time remaining needs the pack's
-capacity in mAh, which is a fact about the cells fitted rather than something the hardware knows.
+**There is no time-remaining in the hardware.** The MAX17040 is a voltage-based gauge: it publishes a
+percentage and a cell voltage and nothing else — no `charge_full`, no `current_now`. The estimate
+above is derived from watching the percentage move over time, which is why it needs a few minutes of
+history before it will say anything.
 
 **The shunt resistance is probably wrong, and it scales everything.** The `ina2xx` driver defaults to
 10 mΩ, and every current and power figure is directly proportional to it. On this board 10 mΩ is
